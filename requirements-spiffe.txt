@@ -1,0 +1,3 @@
+# Official py-spiffe library. PyPI name is `spiffe`.
+# Isolated install: bash scripts/install_py_spiffe.sh
+spiffe>=0.3.1
