@@ -1,0 +1,3 @@
+Official SPIRE binaries from https://github.com/spiffe/spire/releases/tag/v1.15.3
+SHA-256 ca1a4d1155317bdd2afc7f36663828a10410c7c840e54725b90b4064b0a301c7
+Fetch with scripts/fetch_spire.sh. Do not vendor modified agents.
