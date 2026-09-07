@@ -1,0 +1,3 @@
+expected_trust_domain: prod
+allowed_policy_versions: [1, 2, 3, 4, 5]
+max_delegation_depth: 3
