@@ -15,6 +15,8 @@ DOORS = {
     "control12": Door("control12", "planner", "actuation_adapter", "Intent only"),
     "admin_api": Door("admin_api", "operator", "/v1/admin", "dual approval"),
     "hands": Door("hands", "operator", "rings.hands.route", "gated hands"),
+    "agent": Door("agent", "planner", "agents.runtime.mount_agent", "mount parent"),
+    "subagent": Door("subagent", "planner", "agents.spawn.spawn_subagent", "spawn child via attenuate"),
 }
 
 FORBIDDEN_DOORS = (
