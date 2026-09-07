@@ -15,7 +15,7 @@ def main():
     sig = sign(cap)
     print("sig_ok", verify_sig(cap, sig))
     print("verify", verify(cap, rights[0], caller))
-    print("execute", Executor().execute(cap, sig, rights[0], caller)["status"])
+    print("execute", Executor().execute(cap, sig, rights[0], caller).get("status"))
 
 if __name__ == "__main__":
     main()
