@@ -2,43 +2,46 @@ openapi: 3.0.3
 info:
   title: Capability-Plane
   version: 1.0.0
-  description: Agents may only Issue / Attenuate / Verify / Execute.
 servers:
   - url: http://127.0.0.1:8090
 paths:
   /v1/capabilities/issue:
     post:
       operationId: issue_capability
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
       responses:
-        '200':
-          description: Issued
+        '200': {description: Issued}
   /v1/capabilities/attenuate:
     post:
       operationId: attenuate_capability
       responses:
-        '200':
-          description: Attenuated
+        '200': {description: Attenuated}
   /v1/capabilities/verify:
     post:
       operationId: verify_capability
       responses:
-        '200':
-          description: Result
+        '200': {description: Result}
   /v1/execute:
     post:
       operationId: execute_with_capability
       responses:
-        '200':
-          description: Executed
+        '200': {description: Executed}
+  /v1/evidence:
+    get:
+      operationId: query_evidence
+      parameters:
+        - in: query
+          name: stats
+          schema: {type: string}
+        - in: query
+          name: capability_id
+          schema: {type: string}
+        - in: query
+          name: message_type
+          schema: {type: string}
+      responses:
+        '200': {description: Evidence rows or stats}
   /health:
     get:
       operationId: health
       responses:
-        '200':
-          description: ok
+        '200': {description: ok}
