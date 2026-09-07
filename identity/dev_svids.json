@@ -1,0 +1,6 @@
+{
+  "unix:uid:1000": {"spiffe_id": "spiffe://prod/agent/dev", "trust_domain": "prod"},
+  "k8s:sa:plane:broker": {"spiffe_id": "spiffe://prod/broker", "trust_domain": "prod"},
+  "k8s:sa:plane:dashboard": {"spiffe_id": "spiffe://prod/agent/dashboard", "trust_domain": "prod"},
+  "k8s:sa:ops:admin": {"spiffe_id": "spiffe://prod/operator/admin", "trust_domain": "prod"}
+}

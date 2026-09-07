@@ -1,0 +1,29 @@
+version: 1
+trust_domains: [prod]
+max_ttl_seconds: 300
+principals:
+  - prefix: spiffe://prod/agent/
+    allow_templates: [read.demo, execute.tool]
+  - prefix: spiffe://prod/operator/
+    allow_templates: [read.demo]
+    admin: true
+templates:
+  read.demo:
+    rights: [{type: read, resource: demo}]
+    constraints: {rate_limit: {count: 10, window_seconds: 60}}
+    ttl_seconds: 120
+  execute.tool:
+    rights: [{type: Execute, resource: tool.echo}]
+    constraints: {rate_limit: {count: 5, window_seconds: 60}}
+    ttl_seconds: 60
+admin_actions:
+  tenant.suspend.access_only:
+    risk_class: mutating
+    required_approvals: []
+  tenant.suspend.network_isolation:
+    risk_class: destructive
+    required_approvals: [security_admin]
+  tenant.suspend.full:
+    risk_class: destructive
+    required_approvals: [security_admin, resource_owner]
+forbidden: [amplify_rights, ambient_cloud_token, shell_exec]
