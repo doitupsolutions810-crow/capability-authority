@@ -9,10 +9,15 @@ bash scripts/fetch_spire.sh
 bash scripts/start_spire.sh
 export SPIFFE_ENDPOINT_SOCKET=unix:///tmp/spire-lab/sockets/agent.sock
 export PLANE_TRUST_DOMAIN=prod
-bash scripts/install_py_spiffe.sh   # or: pip install --index-url https://pypi.org/simple spiffe
 python3 -m plane_service.server
 ```
 
-Lab uses `join_token` + `insecure_bootstrap`. Not production.
+Python client is the official `spiffe` package (py-spiffe project):
 
-PyPI package name is `spiffe` (HewlettPackard/py-spiffe). `py-spiffe` is not a published dist.
+```bash
+bash scripts/install_py_spiffe.sh
+# or system site-packages:
+# python3 -m pip install --index-url https://pypi.org/simple --target /usr/local/lib/python3.12/dist-packages 'spiffe>=0.3.1'
+```
+
+Lab uses join_token + insecure_bootstrap. Not production.
