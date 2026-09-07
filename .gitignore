@@ -4,3 +4,5 @@ data/
 *.db
 .env
 config/broker_ed25519.pem
+var/spire/
+third_party/spire/bin/
