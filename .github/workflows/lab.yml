@@ -1,0 +1,32 @@
+name: lab
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      PRODUCTION: "0"
+      SPIFFE_REQUIRED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lab deps
+        run: pip install -r requirements-lab.txt
+      - name: Lab tests
+        run: |
+          python tests/test_plane.py
+          python tests/test_evidence_receipt_spiffe.py
+          python tests/test_agents.py
+      - name: Hands + agent demos
+        run: |
+          python scripts/demo_hands.py
+          python scripts/demo_agents.py
+          python scripts/demo_production_profile.py || true
