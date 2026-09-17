@@ -1,38 +1,37 @@
-# Capability Authority
+# capability-authority
 
-High-assurance **control plane for agentic systems**. Planners think. This plane is the only way they act.
+High-assurance **capability + admin control plane** for agentic systems.
 
-Lab mode runs without SPIRE. Production mode **refuses to start** until SPIRE, a pinned measurement, and Postgres exist.
+Agents get short-lived signed rights. Infrastructure changes go through dual
+approval, immutable idempotency, and reconcile-before-retry. Every issued and
+executed act leaves a verifiable receipt.
 
-## Quick start (lab)
+## Quick start
 
 ```bash
-export PYTHONPATH=$PWD
+git clone https://github.com/doitupsolutions810-crow/capability-authority.git
+cd capability-authority
 pip install -r requirements-lab.txt
+export PYTHONPATH=$PWD
 make test
-python3 scripts/demo_hands.py
-python3 scripts/demo_agents.py
-python3 -m plane_service.server
+python3 -m plane_service.server          # :8090
 ```
 
-Optional SPIRE + Workload API SVID:
+## CI
+
+Hosted Actions may be blocked by an account billing lock. Run the same checks
+locally with no billing and no Docker:
 
 ```bash
-bash scripts/fetch_spire.sh
-bash scripts/start_spire.sh
-export SPIFFE_ENDPOINT_SOCKET=unix:///tmp/spire-lab/sockets/agent.sock
+bash scripts/run_ci_local.sh
 ```
 
-## Tests
+See `docs/CI.md`.
 
-GitHub Actions (`lab`) runs `test_plane`, `test_evidence_receipt_spiffe`, and `test_agents` on every push to `main`.
+## Hard rules
 
-## Authority boundaries
-
-| Actor | May |
-|-------|-----|
-| Agent / model | Frozen OpenAPI only |
-| Hands router | Deny shell, kubectl-from-model, ambient keys, hold-bypass |
-| Operator | `k8s_plan` + dual-approved admin actions |
-| Executor | Only path that performs side effects |
-| Production broker | Exit if preflight fails |
+- No ambient shell or god tokens
+- Timeout = unknown → reconcile before retry
+- One immutable provider idempotency key per control-plane request id
+- Forensic / legal hold / dispute always fail-closed
+- Agents never mint admin power; UI never mints privilege
