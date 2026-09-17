@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PYTHONPATH: .
       PRODUCTION: "0"
@@ -37,3 +37,11 @@ jobs:
           python scripts/demo_hands.py
           python scripts/demo_agents.py
           python scripts/demo_production_profile.py || true
+
+  slim-probe:
+    runs-on: ubuntu-slim
+    steps:
+      - name: Report hosted slim pool
+        run: |
+          echo "runner=${RUNNER_NAME:-none} os=${RUNNER_OS:-none} arch=${RUNNER_ARCH:-none}"
+          uname -a
