@@ -1,11 +1,6 @@
-# Start development
+# Development rules
 
-```bash
-export PYTHONPATH=$PWD
-make test
-make plane
-bash scripts/fetch_spire.sh && bash scripts/start_spire.sh
-export SPIFFE_ENDPOINT_SOCKET=unix:///tmp/spire-lab/sockets/agent.sock
-```
-
-Frozen: Issue / Attenuate / Verify / Execute / health / evidence / identity / agents.
+- Frozen OpenAPI only: /v1/capabilities/issue|attenuate|verify, /v1/execute
+- No ambient exec, no god tokens, no hold-bypass
+- Production stays fail-closed (SPIRE + pinned measurement + DATABASE_URL)
+- CI: hosted Actions may be billing-locked; use `bash scripts/run_ci_local.sh`

@@ -1,2 +1,1 @@
-# Lab tests only. SPIRE / py-spiffe are optional.
-cryptography>=41
+cryptography>=42
