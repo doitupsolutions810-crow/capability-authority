@@ -15,7 +15,17 @@ def route(hand: str, payload: Optional[dict[str, Any]] = None) -> dict[str, Any]
     payload = payload or {}
     kind = HAND_ALIASES.get(hand, hand)
     if kind in FORBIDDEN_DOORS or kind in HAND_ALIASES.values():
-        return {"status": "denied", "hand": kind, "error": f"forbidden hand: {kind}"}
+        door = enter(kind, payload)
+        return {
+            "status": "denied",
+            "hand": kind,
+            "error": door.get("error") or f"forbidden hand: {kind}",
+            "safe_path": "admin_api",
+        }
+    if kind == "k8s_plan":
+        return {"status": "admitted", "hand": "k8s_plan", "plan": "NetworkPolicy + Deployment"}
+    if kind == "vault_lease":
+        return {"status": "admitted", "hand": "vault_lease", "long_lived": False}
     if kind == "probe":
         return {"status": "admitted", "hand": "probe", "note": "read-only"}
     return {"status": "denied", "error": f"unknown hand: {kind}"}
