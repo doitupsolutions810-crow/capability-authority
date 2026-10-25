@@ -1,3 +1,4 @@
+import json
 import time
 from collections import defaultdict, deque
 from plane_service.bounds import check_bounds, load_acceptance
@@ -45,9 +46,16 @@ class Executor:
         }
         rl = (cap.get("constraints") or {}).get("rate_limit") or {}
         # Rate-limit buckets must use the same full action identity as authorization.
-        key = (
-            f"{cap.get('id')}:{action_identity['type']}:"
-            f"{action_identity['resource']}:{action_identity['method']}"
+        # Canonical JSON preserves field boundaries even when values contain colons.
+        key = json.dumps(
+            [
+                cap.get("id"),
+                action_identity["type"],
+                action_identity["resource"],
+                action_identity["method"],
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
         )
         if not self.rate_limiter.allow(
             key,
