@@ -36,6 +36,31 @@ def test_issue_sign_execute():
         _fail(str(out))
     print("PASS issue_sign_execute")
 
+def test_verify_binds_method_exactly():
+    from plane_service.core import verify
+    caller = "spiffe://prod/agent/dev"
+    cap = {
+        "expires_at": 9999999999,
+        "audience": caller,
+        "rights": [{"type": "http", "resource": "/records", "method": "GET"}],
+    }
+    if not verify(cap, {"type": "http", "resource": "/records", "method": "GET"}, caller, now_ts=1):
+        _fail("matching method was rejected")
+    if verify(cap, {"type": "http", "resource": "/records", "method": "DELETE"}, caller, now_ts=1):
+        _fail("method mismatch was authorized")
+    if verify(cap, {"type": "http", "resource": "/records"}, caller, now_ts=1):
+        _fail("omitted required method acted as wildcard")
+    methodless = {
+        "expires_at": 9999999999,
+        "audience": caller,
+        "rights": [{"type": "read", "resource": "demo"}],
+    }
+    if not verify(methodless, {"type": "read", "resource": "demo"}, caller, now_ts=1):
+        _fail("legacy method-less right was rejected")
+    if verify(methodless, {"type": "read", "resource": "demo", "method": "DELETE"}, caller, now_ts=1):
+        _fail("method-scoped request matched method-less right")
+    print("PASS verify_binds_method_exactly")
+
 def test_hands_deny():
     from rings.hands import route
     for h in ("shell", "kubectl", "cloud_key", "hold_bypass"):
@@ -56,6 +81,7 @@ def test_prod_preflight_fail_closed():
 def main():
     test_no_amplification()
     test_issue_sign_execute()
+    test_verify_binds_method_exactly()
     test_hands_deny()
     test_prod_preflight_fail_closed()
     print("ALL PASS")
