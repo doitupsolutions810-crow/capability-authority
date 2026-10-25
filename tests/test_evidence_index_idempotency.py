@@ -27,6 +27,31 @@ class EvidenceIndexIdempotencyTests(unittest.TestCase):
             self.assertEqual(len(persisted), 1)
             self.assertEqual(persisted[0]["event_id"], "logical-event-001")
 
+    def test_failed_atomic_commit_does_not_poison_duplicate_detection(self):
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.json"
+            index = EvidenceIndex(path)
+            event = {
+                "event_id": "logical-event-commit-failure",
+                "message_type": "ExecuteReceipt",
+                "outcome": "ok",
+            }
+
+            with patch("evidence.index.os.replace", side_effect=OSError("simulated commit failure")):
+                with self.assertRaisesRegex(OSError, "simulated commit failure"):
+                    index.ingest(event)
+
+            self.assertEqual(index.query(message_type="ExecuteReceipt"), [])
+            self.assertFalse(path.exists())
+
+            index.ingest(event)
+            persisted = json.loads(path.read_text())
+            self.assertEqual(len(persisted), 1)
+            self.assertEqual(persisted[0]["event_id"], "logical-event-commit-failure")
+            self.assertEqual(len(index.query(message_type="ExecuteReceipt")), 1)
+
     def test_same_event_id_with_changed_payload_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             index = EvidenceIndex(Path(tmp) / "evidence.json")
