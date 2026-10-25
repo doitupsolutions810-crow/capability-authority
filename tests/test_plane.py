@@ -31,10 +31,12 @@ def test_issue_sign_execute():
     sig = sign(cap)
     if not verify_sig(cap, sig) or not verify(cap, rights[0], caller):
         _fail("sig/verify")
+    if verify(cap, {"type": "read", "resource": "demo", "method": "DELETE"}, caller):
+        _fail("method mismatch was authorized")
     out = Executor().execute(cap, sig, rights[0], caller)
     if out.get("status") != "ok":
         _fail(str(out))
-    print("PASS issue_sign_execute")
+    print("PASS issue_sign_execute_and_method_binding")
 
 def test_hands_deny():
     from rings.hands import route
