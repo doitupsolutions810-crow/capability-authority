@@ -22,6 +22,19 @@ class RateLimiter:
         return True
 
 
+def _rate_limit_key(capability_id, action_identity):
+    return json.dumps(
+        [
+            capability_id,
+            action_identity.get("type"),
+            action_identity.get("resource"),
+            action_identity.get("method"),
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 class Executor:
     def __init__(self):
         self.rate_limiter = RateLimiter()
@@ -47,16 +60,7 @@ class Executor:
         rl = (cap.get("constraints") or {}).get("rate_limit") or {}
         # Rate-limit buckets must use the same full action identity as authorization.
         # Canonical JSON preserves field boundaries even when values contain colons.
-        key = json.dumps(
-            [
-                cap.get("id"),
-                action_identity["type"],
-                action_identity["resource"],
-                action_identity["method"],
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        key = _rate_limit_key(cap.get("id"), action_identity)
         if not self.rate_limiter.allow(
             key,
             int(rl.get("count") or 5),
