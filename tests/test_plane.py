@@ -5,9 +5,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+
 def _fail(msg):
     print("FAIL", msg)
     raise SystemExit(1)
+
 
 def test_no_amplification():
     from plane_service.core import issue, attenuate
@@ -18,6 +20,7 @@ def test_no_amplification():
         print("PASS no_amplification")
         return
     _fail("amplification was allowed")
+
 
 def test_issue_sign_execute():
     from plane_service.core import issue, verify
@@ -36,12 +39,107 @@ def test_issue_sign_execute():
         _fail(str(out))
     print("PASS issue_sign_execute")
 
+
+def test_verify_binds_method_exactly():
+    from plane_service.core import verify
+    caller = "spiffe://prod/agent/dev"
+    cap = {
+        "expires_at": 9999999999,
+        "audience": caller,
+        "rights": [{"type": "http", "resource": "/records", "method": "GET"}],
+    }
+    if not verify(cap, {"type": "http", "resource": "/records", "method": "GET"}, caller, now_ts=1):
+        _fail("matching method was rejected")
+    if verify(cap, {"type": "http", "resource": "/records", "method": "DELETE"}, caller, now_ts=1):
+        _fail("method mismatch was authorized")
+    if verify(cap, {"type": "http", "resource": "/records"}, caller, now_ts=1):
+        _fail("omitted required method acted as wildcard")
+    methodless = {
+        "expires_at": 9999999999,
+        "audience": caller,
+        "rights": [{"type": "read", "resource": "demo"}],
+    }
+    if not verify(methodless, {"type": "read", "resource": "demo"}, caller, now_ts=1):
+        _fail("legacy method-less right was rejected")
+    if verify(methodless, {"type": "read", "resource": "demo", "method": "DELETE"}, caller, now_ts=1):
+        _fail("method-scoped request matched method-less right")
+    print("PASS verify_binds_method_exactly")
+
+
+def test_receipt_preserves_signed_action_identity():
+    from plane_service.core import issue
+    from plane_service.crypto_sign import sign, verify_sig
+    from plane_service.executor import Executor
+
+    caller = "spiffe://prod/agent/dev"
+    required = {"type": "http", "resource": "/records", "method": "GET"}
+    cap = issue(caller, "spiffe://prod/broker", [required], {}, 60, "prod", "dev:unattested", 1)
+    out = Executor().execute(cap, sign(cap), required, caller)
+    if out.get("status") != "ok":
+        _fail(f"expected GET execution success: {out}")
+    receipt = out.get("receipt") or {}
+    expected = {"type": "http", "resource": "/records", "method": "GET"}
+    if receipt.get("action_identity") != expected:
+        _fail(f"receipt lost full action identity: {receipt.get('action_identity')}")
+    signed_receipt = dict(receipt)
+    signature = signed_receipt.pop("signature", "")
+    if not verify_sig(signed_receipt, signature):
+        _fail("receipt signature did not validate over action identity")
+
+    denied = Executor().execute(
+        cap, sign(cap),
+        {"type": "http", "resource": "/records", "method": "DELETE"},
+        caller,
+    )
+    if denied.get("status") != "error":
+        _fail(f"DELETE unexpectedly passed GET capability: {denied}")
+    print("PASS receipt_preserves_signed_action_identity")
+
+
+def test_rate_limit_key_preserves_tuple_boundaries():
+    from plane_service.executor import _rate_limit_key
+    # These two action tuples collided under the old colon-concatenated key.
+    first = {"type": "a", "resource": "b:c", "method": "d"}
+    second = {"type": "a", "resource": "b", "method": "c:d"}
+    first_key = _rate_limit_key("cap", first)
+    second_key = _rate_limit_key("cap", second)
+    if first_key == second_key:
+        _fail("distinct action tuples collided in rate-limit key encoding")
+    print("PASS rate_limit_key_preserves_tuple_boundaries")
+
+
+def test_zero_rate_limit_count_is_not_defaulted():
+    from plane_service.executor import RateLimiter, _rate_limit_config
+    count, window = _rate_limit_config({"rate_limit": {"count": 0, "window_seconds": 60}})
+    if count != 0 or window != 60:
+        _fail(f"explicit zero was changed: {(count, window)}")
+    if RateLimiter().allow("zero-count", count, window):
+        _fail("zero-count policy allowed an action")
+    print("PASS zero_rate_limit_count_is_not_defaulted")
+
+
+def test_invalid_rate_limit_constraints_fail_closed():
+    from plane_service.executor import _rate_limit_config
+    for constraints in (
+        {"rate_limit": {"count": -1, "window_seconds": 60}},
+        {"rate_limit": {"count": 5, "window_seconds": 0}},
+        {"rate_limit": {"count": "not-an-int", "window_seconds": 60}},
+    ):
+        try:
+            _rate_limit_config(constraints)
+        except ValueError:
+            continue
+        _fail(f"invalid rate-limit config was accepted: {constraints}")
+    print("PASS invalid_rate_limit_constraints_fail_closed")
+
+
 def test_hands_deny():
     from rings.hands import route
     for h in ("shell", "kubectl", "cloud_key", "hold_bypass"):
         if route(h).get("status") != "denied":
             _fail(h)
     print("PASS hands_deny")
+
 
 def test_prod_preflight_fail_closed():
     os.environ["PRODUCTION"] = "1"
@@ -53,12 +151,19 @@ def test_prod_preflight_fail_closed():
         _fail("should fail closed")
     print("PASS prod_preflight_fail_closed")
 
+
 def main():
     test_no_amplification()
     test_issue_sign_execute()
+    test_verify_binds_method_exactly()
+    test_receipt_preserves_signed_action_identity()
+    test_rate_limit_key_preserves_tuple_boundaries()
+    test_zero_rate_limit_count_is_not_defaulted()
+    test_invalid_rate_limit_constraints_fail_closed()
     test_hands_deny()
     test_prod_preflight_fail_closed()
     print("ALL PASS")
+
 
 if __name__ == "__main__":
     main()
