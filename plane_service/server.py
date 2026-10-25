@@ -155,6 +155,7 @@ def handle_execute(body: dict) -> dict:
                 "message_type": "ExecuteReceipt",
                 "capability_id": cap.get("id", ""),
                 "action": receipt.get("action", ""),
+                "action_identity": receipt.get("action_identity"),
                 "outcome": receipt.get("outcome", ""),
             }
         )
