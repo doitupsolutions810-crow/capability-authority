@@ -25,6 +25,11 @@ def _logical_event(event):
     }
 
 
+def _normalized_event_id(event):
+    event_id = event.get("event_id") if isinstance(event, dict) else None
+    return event_id if isinstance(event_id, str) and event_id.strip() else None
+
+
 class EvidenceWarehouse:
     def __init__(self, db_path=None):
         root = Path(__file__).resolve().parents[1]
@@ -37,34 +42,40 @@ class EvidenceWarehouse:
                 "(id INTEGER PRIMARY KEY, payload TEXT, prev_digest TEXT, digest TEXT UNIQUE)"
             )
             columns = {row[1] for row in c.execute("PRAGMA table_info(evidence)")}
-            if "event_id" not in columns:
+            needs_identity_migration = "event_id" not in columns
+            if needs_identity_migration:
                 c.execute("ALTER TABLE evidence ADD COLUMN event_id TEXT")
+                # Backfill only when introducing the column. Doing this on every
+                # append would repeatedly scan all historical no-ID events.
+                rows = c.execute(
+                    "SELECT id, payload FROM evidence WHERE event_id IS NULL"
+                ).fetchall()
+                for row_id, payload in rows:
+                    event = json.loads(payload)
+                    event_id = _normalized_event_id(event)
+                    if event_id is not None:
+                        c.execute(
+                            "UPDATE evidence SET event_id = ? WHERE id = ?",
+                            (event_id, row_id),
+                        )
 
-            # Backfill identities for pre-migration rows. Refuse ambiguous
-            # history rather than silently weakening the uniqueness contract.
-            rows = c.execute(
-                "SELECT id, payload FROM evidence WHERE event_id IS NULL"
-            ).fetchall()
-            for row_id, payload in rows:
-                event = json.loads(payload)
-                event_id = event.get("event_id") if isinstance(event, dict) else None
-                if isinstance(event_id, str) and event_id.strip():
-                    c.execute(
-                        "UPDATE evidence SET event_id = ? WHERE id = ?",
-                        (event_id, row_id),
+            index_exists = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'evidence_event_id_unique'"
+            ).fetchone()
+            if not index_exists:
+                duplicates = c.execute(
+                    "SELECT event_id, COUNT(*) FROM evidence "
+                    "WHERE event_id IS NOT NULL GROUP BY event_id HAVING COUNT(*) > 1"
+                ).fetchall()
+                if duplicates:
+                    raise RuntimeError(
+                        "cannot enforce evidence event identity; duplicate historical event_id values exist"
                     )
-            duplicates = c.execute(
-                "SELECT event_id, COUNT(*) FROM evidence "
-                "WHERE event_id IS NOT NULL GROUP BY event_id HAVING COUNT(*) > 1"
-            ).fetchall()
-            if duplicates:
-                raise RuntimeError(
-                    "cannot enforce evidence event identity; duplicate historical event_id values exist"
+                c.execute(
+                    "CREATE UNIQUE INDEX evidence_event_id_unique "
+                    "ON evidence(event_id) WHERE event_id IS NOT NULL"
                 )
-            c.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS evidence_event_id_unique "
-                "ON evidence(event_id) WHERE event_id IS NOT NULL"
-            )
             c.commit()
 
     def append(self, event):
@@ -125,7 +136,7 @@ class EvidenceWarehouse:
             if prev_d != prev:
                 return {"ok": False, "error": "prev mismatch"}
             event = json.loads(payload)
-            if event.get("event_id") != stored_event_id:
+            if _normalized_event_id(event) != stored_event_id:
                 return {"ok": False, "error": "event identity mismatch"}
             expect = _digest(prev, event)
             if expect != digest:
