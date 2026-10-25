@@ -115,9 +115,18 @@ def handle_issue(body: dict) -> dict:
             "issuer": cap.get("issuer", ""),
         }
     )
+    if not evidence_recorded:
+        # The capability was minted in-process, but its audit record is unknown.
+        # Do not release the signed capability as an unqualified success.
+        return {
+            "status": "indeterminate",
+            "audit_status": "unknown",
+            "capability_id": cap["id"],
+            "error": "capability was issued internally but evidence persistence could not be confirmed; reconcile before retrying",
+        }
     return {
         "status": "ok",
-        "audit_status": "recorded" if evidence_recorded else "unknown",
+        "audit_status": "recorded",
         "capability": cap,
         "signature": sig,
         "platform": os.environ.get("PLANE_PLATFORM", "dev"),
