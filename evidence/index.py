@@ -16,6 +16,14 @@ class EvidenceIndex:
             except Exception:
                 self._docs = []
     def ingest(self, event):
+        # One logical event may reach this index directly and again through the
+        # AttestPipe subscription. A stable event_id makes that fan-out
+        # idempotent instead of silently duplicating audit rows.
+        event_id = event.get("event_id") if isinstance(event, dict) else None
+        if event_id:
+            for existing in self._docs:
+                if existing.get("event_id") == event_id:
+                    return existing
         doc = dict(event)
         doc.setdefault("message_type", event.get("message_type") or event.get("type") or "unknown")
         doc["_indexed_at"] = time.time()
