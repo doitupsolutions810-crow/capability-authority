@@ -22,6 +22,23 @@ class RateLimiter:
         return True
 
 
+def _rate_limit_config(constraints):
+    """Resolve defaults without treating explicit zero as missing.
+
+    A zero count is a valid deny-all policy. A non-positive window is
+    invalid and must fail closed rather than becoming the default window.
+    """
+    rl = (constraints or {}).get("rate_limit") or {}
+    try:
+        count = int(rl["count"]) if "count" in rl else 5
+        window_seconds = int(rl["window_seconds"]) if "window_seconds" in rl else 60
+    except (TypeError, ValueError):
+        raise ValueError("rate limit count/window must be integers")
+    if count < 0 or window_seconds <= 0:
+        raise ValueError("rate limit count must be non-negative and window must be positive")
+    return count, window_seconds
+
+
 def _rate_limit_key(capability_id, action_identity):
     return json.dumps(
         [
@@ -57,15 +74,15 @@ class Executor:
             "resource": required.get("resource"),
             "method": required.get("method"),
         }
-        rl = (cap.get("constraints") or {}).get("rate_limit") or {}
+        try:
+            max_count, window_seconds = _rate_limit_config(cap.get("constraints"))
+        except ValueError:
+            return {"status": "error", "error": "invalid rate limit constraints"}
+
         # Rate-limit buckets must use the same full action identity as authorization.
         # Canonical JSON preserves field boundaries even when values contain colons.
         key = _rate_limit_key(cap.get("id"), action_identity)
-        if not self.rate_limiter.allow(
-            key,
-            int(rl.get("count") or 5),
-            int(rl.get("window_seconds") or 60),
-        ):
+        if not self.rate_limiter.allow(key, max_count, window_seconds):
             return {"status": "error", "error": "rate limited"}
 
         # Keep the legacy display label for compatibility, but sign the full tuple too.
