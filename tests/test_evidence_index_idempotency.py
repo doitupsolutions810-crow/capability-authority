@@ -7,6 +7,22 @@ from evidence.index import EvidenceIndex
 
 
 class EvidenceIndexIdempotencyTests(unittest.TestCase):
+    def test_corrupt_existing_index_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.json"
+            path.write_text("{corrupt json")
+            with self.assertRaisesRegex(RuntimeError, "refusing to initialize an empty index"):
+                EvidenceIndex(path)
+            self.assertEqual(path.read_text(), "{corrupt json")
+
+    def test_wrong_top_level_index_shape_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evidence.json"
+            path.write_text(json.dumps({"event_id": "not-a-list"}))
+            with self.assertRaisesRegex(RuntimeError, "invalid structure"):
+                EvidenceIndex(path)
+            self.assertEqual(json.loads(path.read_text()), {"event_id": "not-a-list"})
+
     def test_same_event_id_is_indexed_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "evidence.json"
