@@ -16,6 +16,7 @@ python3 tests/test_plane.py
 python3 tests/test_evidence_receipt_spiffe.py
 python3 tests/test_agents.py
 python3 tests/test_signing_key_lifecycle.py
+python3 tests/test_production_startup_preflight.py
 
 echo "==> demos"
 python3 scripts/demo_hands.py
