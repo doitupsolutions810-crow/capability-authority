@@ -90,7 +90,7 @@ class EvidenceIndexIdempotencyTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "indeterminate")
         self.assertEqual(result["audit_status"], "unknown")
-        self.assertNotIn("error", {"error": None} if "error" not in result else {})
+        self.assertIn("error", result)
 
 if __name__ == "__main__":
     unittest.main()
