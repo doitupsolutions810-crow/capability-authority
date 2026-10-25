@@ -117,5 +117,7 @@ def attach_to_attestpipe():
         idx = get_index()
         BUS.subscribe(lambda payload: idx.ingest(payload))
         print("[evidence-index] attached to AttestPipe")
+        return True
     except Exception as e:
         print(f"[evidence-index] attach skip: {e}")
+        return False
