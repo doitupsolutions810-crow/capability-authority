@@ -45,6 +45,10 @@ def verify(cap, required, caller, now_ts=None):
     if cap.get("audience") not in (caller, "*"):
         return False
     for r in cap.get("rights") or []:
-        if r.get("type") == required.get("type") and r.get("resource") == required.get("resource"):
+        if (
+            r.get("type") == required.get("type")
+            and r.get("resource") == required.get("resource")
+            and r.get("method") == required.get("method")
+        ):
             return True
     return False

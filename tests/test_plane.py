@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys
+import json, os, sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -31,10 +31,12 @@ def test_issue_sign_execute():
     sig = sign(cap)
     if not verify_sig(cap, sig) or not verify(cap, rights[0], caller):
         _fail("sig/verify")
+    if verify(cap, {"type": "read", "resource": "demo", "method": "DELETE"}, caller):
+        _fail("method mismatch was authorized")
     out = Executor().execute(cap, sig, rights[0], caller)
     if out.get("status") != "ok":
         _fail(str(out))
-    print("PASS issue_sign_execute")
+    print("PASS issue_sign_execute_and_method_binding")
 
 def test_hands_deny():
     from rings.hands import route
@@ -44,20 +46,56 @@ def test_hands_deny():
     print("PASS hands_deny")
 
 def test_prod_preflight_fail_closed():
-    os.environ["PRODUCTION"] = "1"
-    os.environ.pop("PLANE_SPIFFE_ID", None)
-    os.environ.pop("SPIFFE_ENDPOINT_SOCKET", None)
-    os.environ["PLANE_BROKER_MEASUREMENT"] = "dev:unattested"
+    from unittest.mock import patch
     from rings.production_profile import preflight
-    if preflight().ok:
-        _fail("should fail closed")
+    with patch.dict(os.environ, {
+        "PRODUCTION": "1",
+        "PLANE_BROKER_MEASUREMENT": "dev:unattested",
+    }, clear=True):
+        if preflight().ok:
+            _fail("should fail closed without Workload API identity")
     print("PASS prod_preflight_fail_closed")
+
+def test_policy_enforces_rights_allowlist():
+    from unittest.mock import patch
+    from plane_service.policy import PolicyEngine, PolicyError
+    caller = "spiffe://prod/agent/test"
+    with patch.dict(os.environ, {"PRODUCTION": "0"}, clear=True):
+        policy = PolicyEngine()
+        policy.authorize(caller, [{"type": "read", "resource": "demo"}], {}, 60)
+        try:
+            policy.authorize(caller, [{"type": "admin", "resource": "prod-secrets"}], {}, 60)
+        except PolicyError:
+            print("PASS policy_denies_unlisted_lab_right")
+        else:
+            _fail("unlisted right was authorized")
+
+    with patch.dict(os.environ, {"PRODUCTION": "1"}, clear=True):
+        policy = PolicyEngine()
+        try:
+            policy.authorize(caller, [{"type": "read", "resource": "demo"}], {}, 60)
+        except PolicyError:
+            print("PASS production_requires_explicit_rights_policy")
+        else:
+            _fail("production accepted demo defaults without explicit policy")
+
+    allowed = json.dumps([{"type": "write", "resource": "orders", "method": "POST"}])
+    with patch.dict(os.environ, {"PRODUCTION": "1", "PLANE_ALLOWED_RIGHTS": allowed}, clear=True):
+        policy = PolicyEngine()
+        policy.authorize(caller, [{"type": "write", "resource": "orders", "method": "POST"}], {}, 60)
+        try:
+            policy.authorize(caller, [{"type": "write", "resource": "orders", "method": "DELETE"}], {}, 60)
+        except PolicyError:
+            print("PASS policy_binds_allowlist_to_method")
+        else:
+            _fail("method outside allowlist was authorized")
 
 def main():
     test_no_amplification()
     test_issue_sign_execute()
     test_hands_deny()
     test_prod_preflight_fail_closed()
+    test_policy_enforces_rights_allowlist()
     print("ALL PASS")
 
 if __name__ == "__main__":
