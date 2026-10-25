@@ -44,7 +44,15 @@ def verify(cap, required, caller, now_ts=None):
         return False
     if cap.get("audience") not in (caller, "*"):
         return False
+
+    # A capability right is an exact action tuple, not merely a
+    # (type, resource) label. An omitted method is not a wildcard.
+    required_method = required.get("method")
     for r in cap.get("rights") or []:
-        if r.get("type") == required.get("type") and r.get("resource") == required.get("resource"):
+        if (
+            r.get("type") == required.get("type")
+            and r.get("resource") == required.get("resource")
+            and r.get("method") == required_method
+        ):
             return True
     return False
