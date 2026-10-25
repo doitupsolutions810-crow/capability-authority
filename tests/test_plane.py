@@ -98,12 +98,12 @@ def test_receipt_preserves_signed_action_identity():
 
 
 def test_rate_limit_key_preserves_tuple_boundaries():
-    import json
-    # These two action tuples collided under colon-concatenation.
-    first = ["cap", "a", "b:c", "d"]
-    second = ["cap", "a", "b", "c:d"]
-    first_key = json.dumps(first, sort_keys=True, separators=(",", ":"))
-    second_key = json.dumps(second, sort_keys=True, separators=(",", ":"))
+    from plane_service.executor import _rate_limit_key
+    # These two action tuples collided under the old colon-concatenated key.
+    first = {"type": "a", "resource": "b:c", "method": "d"}
+    second = {"type": "a", "resource": "b", "method": "c:d"}
+    first_key = _rate_limit_key("cap", first)
+    second_key = _rate_limit_key("cap", second)
     if first_key == second_key:
         _fail("distinct action tuples collided in rate-limit key encoding")
     print("PASS rate_limit_key_preserves_tuple_boundaries")
