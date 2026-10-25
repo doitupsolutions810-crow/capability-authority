@@ -96,7 +96,6 @@ def test_receipt_preserves_signed_action_identity():
     print("PASS receipt_preserves_signed_action_identity")
 
 
-
 def test_rate_limit_key_preserves_tuple_boundaries():
     from plane_service.executor import _rate_limit_key
     # These two action tuples collided under the old colon-concatenated key.
@@ -107,6 +106,31 @@ def test_rate_limit_key_preserves_tuple_boundaries():
     if first_key == second_key:
         _fail("distinct action tuples collided in rate-limit key encoding")
     print("PASS rate_limit_key_preserves_tuple_boundaries")
+
+
+def test_zero_rate_limit_count_is_not_defaulted():
+    from plane_service.executor import RateLimiter, _rate_limit_config
+    count, window = _rate_limit_config({"rate_limit": {"count": 0, "window_seconds": 60}})
+    if count != 0 or window != 60:
+        _fail(f"explicit zero was changed: {(count, window)}")
+    if RateLimiter().allow("zero-count", count, window):
+        _fail("zero-count policy allowed an action")
+    print("PASS zero_rate_limit_count_is_not_defaulted")
+
+
+def test_invalid_rate_limit_constraints_fail_closed():
+    from plane_service.executor import _rate_limit_config
+    for constraints in (
+        {"rate_limit": {"count": -1, "window_seconds": 60}},
+        {"rate_limit": {"count": 5, "window_seconds": 0}},
+        {"rate_limit": {"count": "not-an-int", "window_seconds": 60}},
+    ):
+        try:
+            _rate_limit_config(constraints)
+        except ValueError:
+            continue
+        _fail(f"invalid rate-limit config was accepted: {constraints}")
+    print("PASS invalid_rate_limit_constraints_fail_closed")
 
 
 def test_hands_deny():
@@ -134,6 +158,8 @@ def main():
     test_verify_binds_method_exactly()
     test_receipt_preserves_signed_action_identity()
     test_rate_limit_key_preserves_tuple_boundaries()
+    test_zero_rate_limit_count_is_not_defaulted()
+    test_invalid_rate_limit_constraints_fail_closed()
     test_hands_deny()
     test_prod_preflight_fail_closed()
     print("ALL PASS")
