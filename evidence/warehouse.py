@@ -18,8 +18,10 @@ def _digest(prev, event):
 
 def _logical_event(event):
     """Remove projection/receipt metadata when comparing an idempotent retry."""
-    return {key: value for key, value in event.items()
-            if key not in {"_indexed_at", "_digest", "_prev_digest"}}
+    return {
+        key: value for key, value in event.items()
+        if key not in {"_indexed_at", "_digest", "_prev_digest"}
+    }
 
 
 class EvidenceWarehouse:
@@ -37,9 +39,8 @@ class EvidenceWarehouse:
             if "event_id" not in columns:
                 c.execute("ALTER TABLE evidence ADD COLUMN event_id TEXT")
 
-            # Backfill the identity column for pre-migration rows. Fail closed on
-            # malformed payloads or duplicate historical IDs rather than silently
-            # weakening the new uniqueness contract.
+            # Backfill identities for pre-migration rows. Refuse ambiguous
+            # history rather than silently weakening the uniqueness contract.
             rows = c.execute(
                 "SELECT id, payload FROM evidence WHERE event_id IS NULL"
             ).fetchall()
@@ -71,8 +72,8 @@ class EvidenceWarehouse:
             if not isinstance(event_id, str) or not event_id.strip():
                 raise ValueError("event_id must be a non-empty string when provided")
 
-        # BEGIN IMMEDIATE serializes both the idempotency lookup and the
-        # read-tip -> digest -> insert sequence across SQLite connections.
+        # BEGIN IMMEDIATE serializes idempotency lookup and chain-tip updates
+        # across independent SQLite connections/processes.
         with sqlite3.connect(str(self.db_path), timeout=30) as c:
             c.execute("PRAGMA busy_timeout = 30000")
             c.execute("BEGIN IMMEDIATE")
@@ -92,6 +93,7 @@ class EvidenceWarehouse:
                     result = dict(existing_event)
                     result["_digest"] = existing[2]
                     result["_prev_digest"] = existing[1]
+                    result["_idempotent_replay"] = True
                     return result
 
             row = c.execute(
@@ -108,18 +110,22 @@ class EvidenceWarehouse:
         result = dict(event)
         result["_digest"] = digest
         result["_prev_digest"] = prev
+        result["_idempotent_replay"] = False
         return result
 
     def verify_chain(self):
         with sqlite3.connect(str(self.db_path), timeout=30) as c:
             rows = c.execute(
-                "SELECT payload, prev_digest, digest FROM evidence ORDER BY id"
+                "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
             ).fetchall()
         prev = "0" * 64
-        for payload, prev_d, digest in rows:
+        for payload, prev_d, digest, stored_event_id in rows:
             if prev_d != prev:
                 return {"ok": False, "error": "prev mismatch"}
-            expect = _digest(prev, json.loads(payload))
+            event = json.loads(payload)
+            if event.get("event_id") != stored_event_id:
+                return {"ok": False, "error": "event identity mismatch"}
+            expect = _digest(prev, event)
             if expect != digest:
                 return {"ok": False, "error": "digest mismatch"}
             prev = digest
