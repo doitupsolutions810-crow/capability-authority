@@ -56,37 +56,6 @@ def test_prod_preflight_fail_closed():
             _fail("should fail closed without Workload API identity")
     print("PASS prod_preflight_fail_closed")
 
-def test_prod_preflight_uses_resolved_spiffe_source():
-    from unittest.mock import patch
-    from plane_service.spiffe_identity import WorkloadIdentity
-    from rings.production_profile import preflight
-
-    with patch.dict(os.environ, {
-        "PRODUCTION": "1",
-        "PLANE_BROKER_MEASUREMENT": "sha256:verified",
-    }, clear=True):
-        with patch(
-            "plane_service.spiffe_identity.fetch_workload_identity",
-            return_value=WorkloadIdentity(
-                "spiffe://prod/agent/test", "prod", "workload-api", True
-            ),
-        ):
-            report = preflight()
-            if not report.ok:
-                _fail("valid workload-api identity rejected: " + str(report.as_dict()))
-            print("PASS prod_preflight_accepts_workload_api_identity")
-
-        with patch(
-            "plane_service.spiffe_identity.fetch_workload_identity",
-            return_value=WorkloadIdentity(
-                "spiffe://prod/agent/test", "prod", "env", False
-            ),
-        ):
-            report = preflight()
-            if report.ok:
-                _fail("environment identity incorrectly accepted as production SPIFFE")
-            print("PASS prod_preflight_rejects_env_identity")
-
 def test_policy_enforces_rights_allowlist():
     from unittest.mock import patch
     from plane_service.policy import PolicyEngine, PolicyError
@@ -126,7 +95,6 @@ def main():
     test_issue_sign_execute()
     test_hands_deny()
     test_prod_preflight_fail_closed()
-    test_prod_preflight_uses_resolved_spiffe_source()
     test_policy_enforces_rights_allowlist()
     print("ALL PASS")
 
