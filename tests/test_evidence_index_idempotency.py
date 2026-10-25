@@ -52,5 +52,45 @@ class EvidenceIndexIdempotencyTests(unittest.TestCase):
             self.assertEqual(len(index.query(message_type="ExecuteReceipt")), 2)
 
 
+
+    def test_issue_does_not_release_capability_when_audit_is_unknown(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from plane_service import server
+
+        cap = {"id": "cap-unknown", "audience": "caller", "issuer": "issuer"}
+        with patch.object(server, "bind_issue_request", return_value={
+            "caller": "caller", "rights": [], "constraints": {}, "ttl_seconds": 60
+        }), patch.object(
+            server, "fetch_workload_identity", return_value=SimpleNamespace(spiffe_id="caller")
+        ), patch.object(server.policy, "authorize"), patch.object(
+            server, "issue", return_value=cap
+        ), patch.object(server, "sign", return_value="signed"), patch.object(
+            server, "_record_evidence", return_value=False
+        ):
+            result = server.handle_issue({})
+
+        self.assertEqual(result["status"], "indeterminate")
+        self.assertEqual(result["audit_status"], "unknown")
+        self.assertEqual(result["capability_id"], "cap-unknown")
+        self.assertNotIn("capability", result)
+        self.assertNotIn("signature", result)
+
+    def test_execute_reports_indeterminate_when_audit_is_unknown(self):
+        from unittest.mock import patch
+        from plane_service import server
+
+        with patch.object(server.executor, "execute", return_value={
+            "status": "ok", "receipt": {"action": "read", "outcome": "executed"}
+        }), patch.object(server, "_record_evidence", return_value=False):
+            result = server.handle_execute({
+                "capability": {"id": "cap-1"}, "signature": "sig",
+                "required": {"type": "read"}, "caller": "caller"
+            })
+
+        self.assertEqual(result["status"], "indeterminate")
+        self.assertEqual(result["audit_status"], "unknown")
+        self.assertNotIn("error", {"error": None} if "error" not in result else {})
+
 if __name__ == "__main__":
     unittest.main()
