@@ -2,6 +2,7 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 
@@ -29,7 +30,7 @@ class EvidenceWarehouse:
         root = Path(__file__).resolve().parents[1]
         self.db_path = Path(db_path or root / "data" / "evidence.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path), timeout=30) as c:
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
             c.execute("PRAGMA busy_timeout = 30000")
             c.execute(
                 "CREATE TABLE IF NOT EXISTS evidence "
@@ -64,6 +65,7 @@ class EvidenceWarehouse:
                 "CREATE UNIQUE INDEX IF NOT EXISTS evidence_event_id_unique "
                 "ON evidence(event_id) WHERE event_id IS NOT NULL"
             )
+            c.commit()
 
     def append(self, event):
         event = dict(event)
@@ -74,7 +76,7 @@ class EvidenceWarehouse:
 
         # BEGIN IMMEDIATE serializes idempotency lookup and chain-tip updates
         # across independent SQLite connections/processes.
-        with sqlite3.connect(str(self.db_path), timeout=30) as c:
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
             c.execute("PRAGMA busy_timeout = 30000")
             c.execute("BEGIN IMMEDIATE")
 
@@ -114,7 +116,7 @@ class EvidenceWarehouse:
         return result
 
     def verify_chain(self):
-        with sqlite3.connect(str(self.db_path), timeout=30) as c:
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
             rows = c.execute(
                 "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
             ).fetchall()
