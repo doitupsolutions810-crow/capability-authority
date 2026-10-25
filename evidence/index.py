@@ -23,6 +23,17 @@ class EvidenceIndex:
         if event_id:
             for existing in self._docs:
                 if existing.get("event_id") == event_id:
+                    existing_payload = {
+                        key: value for key, value in existing.items()
+                        if key not in {"_indexed_at", "_digest"}
+                    }
+                    incoming_payload = dict(event)
+                    incoming_payload.setdefault(
+                        "message_type",
+                        event.get("message_type") or event.get("type") or "unknown",
+                    )
+                    if existing_payload != incoming_payload:
+                        raise ValueError("event_id reused with a different evidence payload")
                     return existing
         doc = dict(event)
         doc.setdefault("message_type", event.get("message_type") or event.get("type") or "unknown")
