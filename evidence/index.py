@@ -12,9 +12,16 @@ class EvidenceIndex:
         self._docs: List[dict] = []
         if self.path.exists():
             try:
-                self._docs = json.loads(self.path.read_text())
-            except Exception:
-                self._docs = []
+                loaded = json.loads(self.path.read_text())
+            except Exception as exc:
+                raise RuntimeError(
+                    f"evidence index is unreadable; refusing to initialize an empty index: {self.path}"
+                ) from exc
+            if not isinstance(loaded, list) or any(not isinstance(row, dict) for row in loaded):
+                raise RuntimeError(
+                    f"evidence index has an invalid structure; refusing to initialize an empty index: {self.path}"
+                )
+            self._docs = loaded
     def ingest(self, event):
         # One logical event may reach this index directly and again through the
         # AttestPipe subscription. A stable event_id makes that fan-out
