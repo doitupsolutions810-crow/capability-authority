@@ -13,11 +13,11 @@ INDEX_DB = Path(os.environ.get("EVIDENCE_INDEX_PATH", str(ROOT / "data" / "evide
 class EvidenceIndex:
     """JSON evidence projection backed by the hash-chained warehouse.
 
-    Warehouse append failures are fatal to ingest: an event must not be
-    represented as successfully indexed if the authoritative append failed.
-    The JSON file is replaced atomically so readers see either the old or new
-    complete document. This is not a cross-store transaction; an index write
-    failure after a successful warehouse append must be reconciled.
+    Warehouse append failures are fatal to ingest. A stable event ID makes a
+    retry return the original ledger receipt; this projection avoids duplicating
+    an event already present and can restore that event if it was missing.
+    The JSON file is atomically replaced, but remains a separate store and is
+    not cross-process transactionally consistent with SQLite.
     """
 
     def __init__(self, path: Optional[Path] = None):
@@ -43,8 +43,6 @@ class EvidenceIndex:
                 tmp.flush()
                 os.fsync(tmp.fileno())
             os.replace(tmp_name, self.path)
-            # Persist the directory entry where supported, so the rename is
-            # durable across a crash on filesystems that honor directory fsync.
             dir_fd = os.open(str(self.path.parent), os.O_RDONLY)
             try:
                 os.fsync(dir_fd)
@@ -63,14 +61,24 @@ class EvidenceIndex:
             doc.setdefault("message_type", event.get("message_type") or event.get("type") or "unknown")
             doc["_indexed_at"] = time.time()
 
-            # The warehouse is the hash-chained authority. Never hide a failed
-            # append and continue as if the event were fully ingested.
             from evidence.warehouse import get_warehouse
             chained = get_warehouse().append(doc)
+            replayed = bool(chained.get("_idempotent_replay"))
+            doc = dict(chained)
+            doc.pop("_prev_digest", None)
+            doc.pop("_idempotent_replay", None)
             doc["_digest"] = chained.get("_digest")
 
+            # A repeated stable ID must not grow the projection. If a previous
+            # crash left the event in the ledger but not this projection, replay
+            # repairs that missing entry using the original committed receipt.
+            event_id = doc.get("event_id")
+            if replayed and event_id is not None:
+                for existing in self._docs:
+                    if existing.get("event_id") == event_id:
+                        return dict(existing)
+
             next_docs = [*self._docs, doc]
-            # Publish the new in-memory view only after the atomic file replace.
             self._write_atomic(next_docs)
             self._docs = next_docs
             return dict(doc)
