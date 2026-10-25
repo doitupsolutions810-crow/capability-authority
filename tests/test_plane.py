@@ -5,9 +5,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+
 def _fail(msg):
     print("FAIL", msg)
     raise SystemExit(1)
+
 
 def test_no_amplification():
     from plane_service.core import issue, attenuate
@@ -18,6 +20,7 @@ def test_no_amplification():
         print("PASS no_amplification")
         return
     _fail("amplification was allowed")
+
 
 def test_issue_sign_execute():
     from plane_service.core import issue, verify
@@ -35,6 +38,7 @@ def test_issue_sign_execute():
     if out.get("status") != "ok":
         _fail(str(out))
     print("PASS issue_sign_execute")
+
 
 def test_verify_binds_method_exactly():
     from plane_service.core import verify
@@ -61,12 +65,44 @@ def test_verify_binds_method_exactly():
         _fail("method-scoped request matched method-less right")
     print("PASS verify_binds_method_exactly")
 
+
+def test_receipt_preserves_signed_action_identity():
+    from plane_service.core import issue
+    from plane_service.crypto_sign import sign, verify_sig
+    from plane_service.executor import Executor
+
+    caller = "spiffe://prod/agent/dev"
+    required = {"type": "http", "resource": "/records", "method": "GET"}
+    cap = issue(caller, "spiffe://prod/broker", [required], {}, 60, "prod", "dev:unattested", 1)
+    out = Executor().execute(cap, sign(cap), required, caller)
+    if out.get("status") != "ok":
+        _fail(f"expected GET execution success: {out}")
+    receipt = out.get("receipt") or {}
+    expected = {"type": "http", "resource": "/records", "method": "GET"}
+    if receipt.get("action_identity") != expected:
+        _fail(f"receipt lost full action identity: {receipt.get('action_identity')}")
+    signed_receipt = dict(receipt)
+    signature = signed_receipt.pop("signature", "")
+    if not verify_sig(signed_receipt, signature):
+        _fail("receipt signature did not validate over action identity")
+
+    denied = Executor().execute(
+        cap, sign(cap),
+        {"type": "http", "resource": "/records", "method": "DELETE"},
+        caller,
+    )
+    if denied.get("status") != "error":
+        _fail(f"DELETE unexpectedly passed GET capability: {denied}")
+    print("PASS receipt_preserves_signed_action_identity")
+
+
 def test_hands_deny():
     from rings.hands import route
     for h in ("shell", "kubectl", "cloud_key", "hold_bypass"):
         if route(h).get("status") != "denied":
             _fail(h)
     print("PASS hands_deny")
+
 
 def test_prod_preflight_fail_closed():
     os.environ["PRODUCTION"] = "1"
@@ -78,13 +114,16 @@ def test_prod_preflight_fail_closed():
         _fail("should fail closed")
     print("PASS prod_preflight_fail_closed")
 
+
 def main():
     test_no_amplification()
     test_issue_sign_execute()
     test_verify_binds_method_exactly()
+    test_receipt_preserves_signed_action_identity()
     test_hands_deny()
     test_prod_preflight_fail_closed()
     print("ALL PASS")
+
 
 if __name__ == "__main__":
     main()
