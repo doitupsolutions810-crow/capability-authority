@@ -96,6 +96,19 @@ def test_receipt_preserves_signed_action_identity():
     print("PASS receipt_preserves_signed_action_identity")
 
 
+
+def test_rate_limit_key_preserves_tuple_boundaries():
+    import json
+    # These two action tuples collided under colon-concatenation.
+    first = ["cap", "a", "b:c", "d"]
+    second = ["cap", "a", "b", "c:d"]
+    first_key = json.dumps(first, sort_keys=True, separators=(",", ":"))
+    second_key = json.dumps(second, sort_keys=True, separators=(",", ":"))
+    if first_key == second_key:
+        _fail("distinct action tuples collided in rate-limit key encoding")
+    print("PASS rate_limit_key_preserves_tuple_boundaries")
+
+
 def test_hands_deny():
     from rings.hands import route
     for h in ("shell", "kubectl", "cloud_key", "hold_bypass"):
@@ -120,6 +133,7 @@ def main():
     test_issue_sign_execute()
     test_verify_binds_method_exactly()
     test_receipt_preserves_signed_action_identity()
+    test_rate_limit_key_preserves_tuple_boundaries()
     test_hands_deny()
     test_prod_preflight_fail_closed()
     print("ALL PASS")
