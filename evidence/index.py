@@ -1,4 +1,4 @@
-import json, os, time
+import json, os, tempfile, time
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -44,8 +44,31 @@ class EvidenceIndex:
             doc["_digest"] = chained.get("_digest")
         except Exception:
             pass
-        self._docs.append(doc)
-        self.path.write_text(json.dumps(self._docs, indent=2, default=str))
+        # Persist the candidate snapshot before publishing it in memory. A
+        # failed write must not leave an event that a later duplicate delivery
+        # can mistake for a committed record.
+        candidate_docs = [*self._docs, doc]
+        serialized = json.dumps(candidate_docs, indent=2, default=str)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.",
+            suffix=".tmp",
+            dir=str(self.path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(serialized)
+                stream.flush()
+                os.fsync(stream.fileno())
+            # Atomic replacement prevents readers from observing a partially
+            # written JSON index. The temp file lives on the same filesystem.
+            os.replace(temp_name, self.path)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+        self._docs = candidate_docs
         return doc
     def query(self, *, capability_id=None, request_id=None, actor=None, message_type=None, limit=50):
         out = []
