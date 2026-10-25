@@ -27,9 +27,9 @@ class ProductionStartupPreflightTests(unittest.TestCase):
                 capture_output=True,
                 timeout=20,
             )
-        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("production signing-key preflight failed", proc.stderr)
-        self.assertFalse(Path(tmp, "missing.pem").exists())
+            self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertIn("production signing-key preflight failed", proc.stderr)
+            self.assertFalse(Path(tmp, "missing.pem").exists())
 
 
 if __name__ == "__main__":
