@@ -27,6 +27,14 @@ POLICY_VERSION = int(os.environ.get("PLANE_POLICY_VERSION", "1"))
 BROKER_MEASUREMENT = os.environ.get("PLANE_BROKER_MEASUREMENT", "dev:unattested")
 ISSUER = f"spiffe://{TRUST_DOMAIN}/broker"
 
+# Force signing identity validation before accepting any production requests.
+# The key loader fails closed for missing, unsafe, or invalid provisioned keys.
+if os.environ.get("PRODUCTION", "0") == "1" or os.environ.get("PLANE_PRODUCTION", "0") == "1":
+    try:
+        public_key_b64()
+    except Exception as exc:
+        raise SystemExit("production signing-key preflight failed; provision a safe PLANE_SIGNING_KEY") from exc
+
 policy = PolicyEngine()
 executor = Executor()
 acceptance = load_acceptance()
