@@ -27,6 +27,22 @@ class EvidenceIndexIdempotencyTests(unittest.TestCase):
             self.assertEqual(len(persisted), 1)
             self.assertEqual(persisted[0]["event_id"], "logical-event-001")
 
+    def test_same_event_id_with_changed_payload_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            index = EvidenceIndex(Path(tmp) / "evidence.json")
+            index.ingest({
+                "event_id": "logical-event-001",
+                "message_type": "ExecuteReceipt",
+                "outcome": "ok",
+            })
+
+            with self.assertRaisesRegex(ValueError, "different evidence payload"):
+                index.ingest({
+                    "event_id": "logical-event-001",
+                    "message_type": "ExecuteReceipt",
+                    "outcome": "denied",
+                })
+
     def test_distinct_event_ids_are_not_collapsed(self):
         with tempfile.TemporaryDirectory() as tmp:
             index = EvidenceIndex(Path(tmp) / "evidence.json")
