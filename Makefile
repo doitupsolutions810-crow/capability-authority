@@ -3,6 +3,10 @@
 test:
 	PYTHONPATH=. python3 tests/test_plane.py
 	PYTHONPATH=. python3 tests/test_evidence_receipt_spiffe.py
+	PYTHONPATH=. python3 tests/test_evidence_index_fail_closed.py
+	PYTHONPATH=. python3 tests/test_evidence_index_projection_consistency.py
+	PYTHONPATH=. python3 tests/test_evidence_recording_contract.py
+	PYTHONPATH=. python3 tests/test_evidence_warehouse_concurrency.py
 	PYTHONPATH=. python3 tests/test_agents.py
 
 ci:

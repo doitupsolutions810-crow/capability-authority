@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from evidence.index import EvidenceIndex
+from evidence.warehouse import EvidenceWarehouse
 
 
 class EvidenceIndexFailClosedTests(unittest.TestCase):
@@ -26,63 +27,48 @@ class EvidenceIndexFailClosedTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "index.json"
             index = EvidenceIndex(path)
-            with patch("evidence.warehouse.get_warehouse") as get_warehouse:
-                get_warehouse.return_value.append.side_effect = OSError("warehouse unavailable")
+            warehouse = EvidenceWarehouse(Path(tmp) / "evidence.db")
+            with patch("evidence.warehouse.get_warehouse", return_value=warehouse), patch.object(
+                warehouse, "append", side_effect=OSError("warehouse unavailable")
+            ):
                 with self.assertRaisesRegex(OSError, "warehouse unavailable"):
                     index.ingest({"event_id": "evt-1", "message_type": "Probe"})
-            self.assertEqual(index.stats()["total"], 0)
+                self.assertEqual(index.stats()["total"], 0)
             self.assertFalse(path.exists())
 
     def test_successful_ingest_persists_complete_json_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "index.json"
             index = EvidenceIndex(path)
-            with patch("evidence.warehouse.get_warehouse") as get_warehouse:
-                get_warehouse.return_value.append.side_effect = lambda event: {
-                    **event, "_digest": "a" * 64, "_idempotent_replay": False
-                }
+            warehouse = EvidenceWarehouse(Path(tmp) / "evidence.db")
+            with patch("evidence.warehouse.get_warehouse", return_value=warehouse):
                 saved = index.ingest({"event_id": "evt-1", "message_type": "Probe"})
-            self.assertEqual(saved["_digest"], "a" * 64)
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), [saved])
-            self.assertEqual(index.stats()["total"], 1)
+                self.assertEqual(saved["_digest"], json.loads(path.read_text(encoding="utf-8"))[0]["_digest"])
+                self.assertEqual(index.stats()["total"], 1)
             self.assertFalse(list(Path(tmp).glob("*.tmp")))
+            self.assertEqual(warehouse.verify_chain()["length"], 1)
 
     def test_retry_does_not_duplicate_projection_and_can_repair_missing_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "index.json"
+            warehouse = EvidenceWarehouse(Path(tmp) / "evidence.db")
             index = EvidenceIndex(path)
-            committed = {}
-
-            def append(event):
-                event_id = event["event_id"]
-                if event_id not in committed:
-                    committed[event_id] = dict(event)
-                    return {
-                        **event, "_digest": "b" * 64, "_prev_digest": "0" * 64,
-                        "_idempotent_replay": False,
-                    }
-                return {
-                    **committed[event_id], "_digest": "b" * 64, "_prev_digest": "0" * 64,
-                    "_idempotent_replay": True,
-                }
-
-            with patch("evidence.warehouse.get_warehouse") as get_warehouse:
-                get_warehouse.return_value.append.side_effect = append
+            with patch("evidence.warehouse.get_warehouse", return_value=warehouse):
                 first = index.ingest({"event_id": "evt-stable", "message_type": "Probe"})
                 retry = index.ingest({"event_id": "evt-stable", "message_type": "Probe"})
-            self.assertEqual(first["_digest"], retry["_digest"])
-            self.assertEqual(index.stats()["total"], 1)
+                self.assertEqual(first["_digest"], retry["_digest"])
+                self.assertEqual(index.stats()["total"], 1)
 
-            # A fresh projection instance can reconstruct the committed event
-            # when the ledger has it but the projection file is absent.
-            repair_path = Path(tmp) / "repair.json"
-            repair_index = EvidenceIndex(repair_path)
-            with patch("evidence.warehouse.get_warehouse") as get_warehouse:
-                get_warehouse.return_value.append.side_effect = append
+                # Reconstruct a missing projection from the committed warehouse event.
+                repair_path = Path(tmp) / "repair.json"
+                repair_index = EvidenceIndex(repair_path)
                 repaired = repair_index.ingest({"event_id": "evt-stable", "message_type": "Probe"})
-            self.assertEqual(repaired["_digest"], "b" * 64)
-            self.assertEqual(repair_index.stats()["total"], 1)
-            self.assertEqual(json.loads(repair_path.read_text(encoding="utf-8"))[0]["event_id"], "evt-stable")
+                self.assertEqual(repaired["_digest"], first["_digest"])
+                self.assertEqual(repair_index.stats()["total"], 1)
+                self.assertEqual(
+                    json.loads(repair_path.read_text(encoding="utf-8"))[0]["event_id"],
+                    "evt-stable",
+                )
 
 
 if __name__ == "__main__":

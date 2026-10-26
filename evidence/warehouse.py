@@ -126,6 +126,34 @@ class EvidenceWarehouse:
         result["_idempotent_replay"] = False
         return result
 
+    def read_verified_events(self):
+        """Return the ordered ledger only after verifying identities and hashes."""
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
+            c.execute("PRAGMA busy_timeout = 30000")
+            c.execute("BEGIN")
+            rows = c.execute(
+                "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
+            ).fetchall()
+
+        prev = "0" * 64
+        events = []
+        for payload, prev_d, digest, stored_event_id in rows:
+            if prev_d != prev:
+                raise ValueError("evidence warehouse chain is invalid: prev mismatch")
+            event = json.loads(payload)
+            if not isinstance(event, dict):
+                raise ValueError("evidence warehouse chain is invalid: payload is not an object")
+            if _normalized_event_id(event) != stored_event_id:
+                raise ValueError("evidence warehouse chain is invalid: event identity mismatch")
+            expected = _digest(prev, event)
+            if expected != digest:
+                raise ValueError("evidence warehouse chain is invalid: digest mismatch")
+            projected = dict(event)
+            projected["_digest"] = digest
+            events.append(projected)
+            prev = digest
+        return events
+
     def verify_chain(self):
         with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
             rows = c.execute(
