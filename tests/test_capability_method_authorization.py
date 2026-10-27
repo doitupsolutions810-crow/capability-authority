@@ -64,6 +64,17 @@ class MethodBoundCapabilityTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     attenuate(self.cap, malformed_rights)
 
+    def test_attenuation_rejects_malformed_parent_rights(self):
+        malformed_caps = (
+            {**self.cap, "rights": [None]},
+            {**self.cap, "rights": [{"type": "file", "resource": "report.txt"}]},
+            {**self.cap, "rights": "not-a-list"},
+        )
+        for malformed in malformed_caps:
+            with self.subTest(capability=malformed):
+                with self.assertRaises(ValueError):
+                    attenuate(malformed, [{"type": "file", "resource": "report.txt", "method": "read"}])
+
     def test_attenuation_accepts_exact_subset(self):
         child = attenuate(
             self.cap,
