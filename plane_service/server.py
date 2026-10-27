@@ -170,6 +170,13 @@ def _query_operation_events(operation_id: str, message_type: str) -> list[dict]:
     )
 
 
+def _verify_executor_receipt(receipt_body: dict, signature: str) -> bool:
+    try:
+        return verify_sig(receipt_body, signature)
+    except Exception:
+        return False
+
+
 def handle_execute(body: dict) -> dict:
     return execute_with_idempotency(
         body,
@@ -177,6 +184,7 @@ def handle_execute(body: dict) -> dict:
         record_evidence=_record_evidence,
         query_receipts=lambda operation_id: _query_operation_events(operation_id, "ExecuteReceipt"),
         query_intents=lambda operation_id: _query_operation_events(operation_id, "ExecuteIntent"),
+        verify_executor_receipt=_verify_executor_receipt,
         ledger=_get_operation_ledger(),
     )
 
