@@ -20,6 +20,7 @@ from plane_service.crypto_sign import public_key_b64, sign, verify_sig
 from plane_service.executor import Executor
 from plane_service.operation_ledger import OperationLedger
 from plane_service.execution_contract import execute_with_idempotency
+from plane_service.execution_contract import execution_http_status
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
 from plane_service.spiffe_identity import fetch_workload_identity
@@ -225,6 +226,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode() or "{}")
+            if not isinstance(body, dict):
+                self._json(400, {"status": "error", "error": "request_body_must_be_object"})
+                return
             if path == "/v1/execute":
                 header_id = (self.headers.get("Idempotency-Key") or "").strip()
                 if header_id:
@@ -241,7 +245,9 @@ class Handler(BaseHTTPRequestHandler):
             if not fn:
                 self._json(404, {"status": "error", "error": "unknown path"})
                 return
-            self._json(200, fn(body))
+            result = fn(body)
+            status_code = execution_http_status(result) if path == "/v1/execute" else 200
+            self._json(status_code, result)
         except Exception as e:
             self._json(500, {"status": "error", "error": str(e)})
 
