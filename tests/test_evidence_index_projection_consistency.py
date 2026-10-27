@@ -90,6 +90,45 @@ class EvidenceIndexProjectionConsistencyTests(unittest.TestCase):
                         process.terminate()
                         process.join(timeout=5)
 
+    def test_projection_failure_after_commit_is_repaired_by_query_and_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index_path = root / "index.json"
+            db_path = root / "evidence.db"
+            warehouse = EvidenceWarehouse(db_path)
+            index = EvidenceIndex(index_path)
+            event = {
+                "event_id": "evt-repair-after-projection-failure",
+                "message_type": "Probe",
+                "value": "durable-ledger"
+            }
+
+            # The ledger append commits before the disposable JSON projection.
+            # Simulate a crash-like projection write error after that commit.
+            with patch("evidence.warehouse.get_warehouse", return_value=warehouse):
+                with patch.object(index, "_write_atomic",
+                                  side_effect=OSError("simulated projection failure")):
+                    with self.assertRaisesRegex(OSError, "simulated projection failure"):
+                        index.ingest(event)
+
+                committed = warehouse.verify_chain()
+                self.assertTrue(committed["ok"], committed)
+                self.assertEqual(committed["length"], 1)
+
+                # The next read rebuilds the materialized view from the ledger.
+                queried = index.query(limit=10)
+                self.assertEqual([item["event_id"] for item in queried],
+                                 ["evt-repair-after-projection-failure"])
+                persisted = json.loads(index_path.read_text(encoding="utf-8"))
+                self.assertEqual(len(persisted), 1)
+
+                # Retrying the same logical operation is idempotent and does not append twice.
+                retried = index.ingest(event)
+                self.assertEqual(retried["event_id"], event["event_id"])
+                self.assertEqual(warehouse.verify_chain()["length"], 1)
+                persisted_after_retry = json.loads(index_path.read_text(encoding="utf-8"))
+                self.assertEqual(len(persisted_after_retry), 1)
+
     def test_query_fails_closed_when_the_authoritative_chain_is_corrupt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
