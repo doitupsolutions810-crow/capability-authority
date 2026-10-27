@@ -35,6 +35,7 @@ jobs:
           python tests/test_evidence_index_projection_consistency.py
           python tests/test_evidence_recording_contract.py
           python tests/test_evidence_warehouse_concurrency.py
+          python tests/test_execution_contract.py
           python tests/test_agents.py
       - name: Hands + agent demos
         run: |
