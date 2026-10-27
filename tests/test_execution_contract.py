@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from plane_service.execution_contract import execute_with_idempotency
+from plane_service.execution_contract import execute_with_idempotency, execution_http_status
 from plane_service.operation_ledger import OperationLedger
 
 
@@ -233,6 +233,15 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(replay["status"], "indeterminate")
         self.assertEqual(replay["error"], "completed_receipt_missing_or_mismatched")
         self.assertEqual(self.executor_calls, 1)
+
+
+    def test_uncertain_operations_are_not_reported_as_http_success(self):
+        self.assertEqual(execution_http_status({"status": "indeterminate"}), 202)
+        self.assertEqual(execution_http_status({"status": "error", "error": "operation_id_payload_conflict"}), 409)
+        self.assertEqual(execution_http_status({"status": "error", "error": "operation_id_required"}), 400)
+        self.assertEqual(execution_http_status({"status": "error", "error": "operation_ledger_unavailable"}), 503)
+        self.assertEqual(execution_http_status({"status": "error", "error": "execution_intent_not_durable"}), 503)
+        self.assertEqual(execution_http_status({"status": "ok"}), 200)
 
     @staticmethod
     def _digest_for(body):
