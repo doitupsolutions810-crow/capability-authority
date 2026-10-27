@@ -11,6 +11,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
+from contextlib import closing
 from typing import Any, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +22,7 @@ class OperationLedger:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path or DEFAULT_DB)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS execute_operations (
@@ -60,7 +61,7 @@ class OperationLedger:
     def claim(self, operation_id: str, request_digest: str) -> dict[str, Any]:
         """Atomically claim new work or return the existing operation state."""
         now = time.time()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT operation_id, request_digest, state, result_json, created_at, updated_at "
@@ -92,7 +93,7 @@ class OperationLedger:
 
     def mark_not_started(self, operation_id: str, request_digest: str) -> None:
         """Allow retry only when intent persistence failed before execution began."""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "UPDATE execute_operations SET state='not_started', updated_at=? "
@@ -103,7 +104,7 @@ class OperationLedger:
 
     def mark_indeterminate(self, operation_id: str, request_digest: str) -> None:
         """Persist an uncertain outcome; it must not trigger automatic re-execution."""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "UPDATE execute_operations SET state='indeterminate', updated_at=? "
@@ -114,7 +115,7 @@ class OperationLedger:
 
     def complete(self, operation_id: str, request_digest: str, result: dict[str, Any]) -> None:
         encoded = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 "UPDATE execute_operations SET state='completed', result_json=?, updated_at=? "
