@@ -15,6 +15,28 @@ from typing import Any, Callable
 _OPERATION_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
+
+def execution_http_status(result: dict[str, Any]) -> int:
+    """Map operation uncertainty to an HTTP status without laundering success."""
+    if result.get("status") == "indeterminate":
+        return 202
+    error = result.get("error")
+    if error in {
+        "operation_id_required",
+        "operation_request_not_canonicalizable",
+        "idempotency_key_mismatch",
+    }:
+        return 400
+    if error == "operation_id_payload_conflict":
+        return 409
+    if error in {
+        "operation_ledger_unavailable",
+        "execution_intent_not_durable",
+    }:
+        return 503
+    return 200
+
+
 def _request_digest(body: dict[str, Any]) -> str:
     payload = {key: value for key, value in body.items() if key != "operation_id"}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
