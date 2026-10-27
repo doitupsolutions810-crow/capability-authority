@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,21 @@ ISSUER = f"spiffe://{TRUST_DOMAIN}/broker"
 
 policy = PolicyEngine()
 executor = Executor()
-operation_ledger = OperationLedger()
+# The operation ledger is initialized lazily after server preflight, on the first
+# execution request. Importing the module must not create or migrate production data.
+_operation_ledger = None
+_operation_ledger_lock = threading.Lock()
+
+
+def _get_operation_ledger():
+    global _operation_ledger
+    if _operation_ledger is None:
+        with _operation_ledger_lock:
+            if _operation_ledger is None:
+                _operation_ledger = OperationLedger()
+    return _operation_ledger
+
+
 acceptance = load_acceptance()
 
 _EVIDENCE_BUS_ATTACHED = False
@@ -162,7 +177,7 @@ def handle_execute(body: dict) -> dict:
         record_evidence=_record_evidence,
         query_receipts=lambda operation_id: _query_operation_events(operation_id, "ExecuteReceipt"),
         query_intents=lambda operation_id: _query_operation_events(operation_id, "ExecuteIntent"),
-        ledger=operation_ledger,
+        ledger=_get_operation_ledger(),
     )
 
 
