@@ -72,7 +72,29 @@ def execute_with_idempotency(
             "retry_safe": False,
         }
     if claim.get("state") == "completed" and isinstance(claim.get("result"), dict):
-        return {**claim["result"], "replayed": True}
+        # The operation row is a recovery index, not a substitute for the
+        # durable evidence ledger. Revalidate the receipt on every replay.
+        try:
+            saved_receipts = query_receipts(operation_id)
+        except Exception:
+            return _indeterminate(operation_id, "completed_receipt_verification_unavailable")
+        expected_event_id = f"execute-operation.{operation_id}.receipt"
+        saved_result = claim["result"]
+        receipt_is_durable = any(
+            event.get("event_id") == expected_event_id
+            and event.get("operation_id") == operation_id
+            and event.get("request_id") == operation_id
+            and event.get("request_digest") == request_digest
+            and event.get("result") == saved_result
+            for event in saved_receipts
+        )
+        if not receipt_is_durable:
+            try:
+                ledger.mark_indeterminate(operation_id, request_digest)
+            except Exception:
+                pass
+            return _indeterminate(operation_id, "completed_receipt_missing_or_mismatched")
+        return {**saved_result, "replayed": True}
     if claim.get("state") != "claimed":
         # A previous process may have persisted the receipt but crashed before
         # updating the operation row. Read back evidence before deciding.
@@ -80,6 +102,7 @@ def execute_with_idempotency(
             receipts = query_receipts(operation_id)
         except Exception:
             return _indeterminate(operation_id, "receipt_reconciliation_unavailable")
+        expected_event_id = f"execute-operation.{operation_id}.receipt"
         for receipt_event in receipts:
             if receipt_event.get("request_digest") != request_digest:
                 return {
@@ -88,6 +111,12 @@ def execute_with_idempotency(
                     "operation_id": operation_id,
                     "retry_safe": False,
                 }
+            if (
+                receipt_event.get("event_id") != expected_event_id
+                or receipt_event.get("operation_id") != operation_id
+                or receipt_event.get("request_id") != operation_id
+            ):
+                continue
             saved_result = receipt_event.get("result")
             if isinstance(saved_result, dict):
                 durable_result = {
@@ -186,6 +215,9 @@ def execute_with_idempotency(
         receipts = query_receipts(operation_id)
         verified_receipt = any(
             event.get("event_id") == receipt_event["event_id"]
+            and event.get("message_type") == "ExecuteReceipt"
+            and event.get("operation_id") == operation_id
+            and event.get("request_id") == operation_id
             and event.get("request_digest") == request_digest
             and event.get("result") == durable_result
             for event in receipts
