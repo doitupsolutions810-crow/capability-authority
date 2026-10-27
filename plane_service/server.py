@@ -18,6 +18,8 @@ from plane_service.bounds import check_bounds, load_acceptance
 from plane_service.core import attenuate, issue, verify
 from plane_service.crypto_sign import public_key_b64, sign, verify_sig
 from plane_service.executor import Executor
+from plane_service.operation_ledger import OperationLedger
+from plane_service.execution_contract import execute_with_idempotency
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
 from plane_service.spiffe_identity import fetch_workload_identity
@@ -29,6 +31,7 @@ ISSUER = f"spiffe://{TRUST_DOMAIN}/broker"
 
 policy = PolicyEngine()
 executor = Executor()
+operation_ledger = OperationLedger()
 acceptance = load_acceptance()
 
 _EVIDENCE_BUS_ATTACHED = False
@@ -142,23 +145,24 @@ def handle_verify(body: dict) -> dict:
     return {"status": "ok" if ok else "error", "valid": ok}
 
 
+def _query_operation_events(operation_id: str, message_type: str) -> list[dict]:
+    from evidence.index import get_index
+    return get_index().query(
+        request_id=operation_id,
+        message_type=message_type,
+        limit=10,
+    )
+
+
 def handle_execute(body: dict) -> dict:
-    cap = body.get("capability") or {}
-    sig = body.get("signature") or ""
-    required = body.get("required") or {}
-    caller = body.get("caller") or cap.get("audience") or ""
-    result = executor.execute(cap, sig, required, caller)
-    if result.get("status") == "ok":
-        receipt = result.get("receipt") or {}
-        _record_evidence(
-            {
-                "message_type": "ExecuteReceipt",
-                "capability_id": cap.get("id", ""),
-                "action": receipt.get("action", ""),
-                "outcome": receipt.get("outcome", ""),
-            }
-        )
-    return result
+    return execute_with_idempotency(
+        body,
+        executor=executor.execute,
+        record_evidence=_record_evidence,
+        query_receipts=lambda operation_id: _query_operation_events(operation_id, "ExecuteReceipt"),
+        query_intents=lambda operation_id: _query_operation_events(operation_id, "ExecuteIntent"),
+        ledger=operation_ledger,
+    )
 
 
 def handle_agent_mount(body: dict) -> dict:
@@ -221,6 +225,18 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode() or "{}")
+            if path == "/v1/execute":
+                header_id = (self.headers.get("Idempotency-Key") or "").strip()
+                if header_id:
+                    supplied_id = body.get("operation_id")
+                    if supplied_id not in (None, "", header_id):
+                        self._json(400, {
+                            "status": "error",
+                            "error": "idempotency_key_mismatch",
+                            "retry_safe": False,
+                        })
+                        return
+                    body["operation_id"] = header_id
             fn = ROUTES.get(path)
             if not fn:
                 self._json(404, {"status": "error", "error": "unknown path"})
