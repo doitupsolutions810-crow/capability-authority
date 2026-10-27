@@ -53,6 +53,39 @@ def _indeterminate(operation_id: str, reason: str, *, audit_status: str = "unkno
     }
 
 
+def _signed_executor_receipt_matches(
+    result: dict[str, Any],
+    *,
+    operation_id: str,
+    request_digest: str,
+    capability_id: str,
+    action: dict[str, Any],
+    verify_executor_receipt: Callable[[dict[str, Any], str], bool],
+) -> bool:
+    """Require the exact signed executor receipt for successful execution."""
+    if result.get("status") != "ok":
+        return True
+    receipt = result.get("receipt")
+    if not isinstance(receipt, dict):
+        return False
+    signature = receipt.get("signature")
+    if not isinstance(signature, str) or not signature:
+        return False
+    unsigned = {key: value for key, value in receipt.items() if key != "signature"}
+    if (
+        unsigned.get("capability_id") != capability_id
+        or unsigned.get("action_identity") != action
+        or unsigned.get("operation_id") != operation_id
+        or unsigned.get("request_digest") != request_digest
+        or unsigned.get("outcome") != "ok"
+    ):
+        return False
+    try:
+        return verify_executor_receipt(unsigned, signature) is True
+    except Exception:
+        return False
+
+
 def execute_with_idempotency(
     body: dict[str, Any],
     *,
@@ -60,6 +93,7 @@ def execute_with_idempotency(
     record_evidence: Callable[[dict], Any],
     query_receipts: Callable[[str], list[dict[str, Any]]],
     query_intents: Callable[[str], list[dict[str, Any]]],
+    verify_executor_receipt: Callable[[dict[str, Any], str], bool],
     ledger,
 ) -> dict[str, Any]:
     """Execute once per operation ID and require durable receipt read-back."""
@@ -75,6 +109,17 @@ def execute_with_idempotency(
         request_digest = _request_digest(body)
     except (TypeError, ValueError):
         return {"status": "error", "error": "operation_request_not_canonicalizable"}
+
+    capability = body.get("capability") or {}
+    signature = body.get("signature") or ""
+    required = body.get("required") or {}
+    caller = body.get("caller") or capability.get("audience") or ""
+    capability_id = capability.get("id", "") if isinstance(capability, dict) else ""
+    action = {
+        "type": required.get("type") if isinstance(required, dict) else None,
+        "resource": required.get("resource") if isinstance(required, dict) else None,
+        "method": required.get("method") if isinstance(required, dict) else None,
+    }
 
     try:
         claim = ledger.claim(operation_id, request_digest)
@@ -102,13 +147,23 @@ def execute_with_idempotency(
             return _indeterminate(operation_id, "completed_receipt_verification_unavailable")
         expected_event_id = f"execute-operation.{operation_id}.receipt"
         saved_result = claim["result"]
-        receipt_is_durable = any(
-            event.get("event_id") == expected_event_id
-            and event.get("operation_id") == operation_id
-            and event.get("request_id") == operation_id
-            and event.get("request_digest") == request_digest
-            and event.get("result") == saved_result
-            for event in saved_receipts
+        receipt_is_durable = (
+            _signed_executor_receipt_matches(
+                saved_result,
+                operation_id=operation_id,
+                request_digest=request_digest,
+                capability_id=capability_id,
+                action=action,
+                verify_executor_receipt=verify_executor_receipt,
+            )
+            and any(
+                event.get("event_id") == expected_event_id
+                and event.get("operation_id") == operation_id
+                and event.get("request_id") == operation_id
+                and event.get("request_digest") == request_digest
+                and event.get("result") == saved_result
+                for event in saved_receipts
+            )
         )
         if not receipt_is_durable:
             try:
@@ -140,7 +195,14 @@ def execute_with_idempotency(
             ):
                 continue
             saved_result = receipt_event.get("result")
-            if isinstance(saved_result, dict):
+            if isinstance(saved_result, dict) and _signed_executor_receipt_matches(
+                saved_result,
+                operation_id=operation_id,
+                request_digest=request_digest,
+                capability_id=capability_id,
+                action=action,
+                verify_executor_receipt=verify_executor_receipt,
+            ):
                 durable_result = {
                     **saved_result,
                     "operation_id": operation_id,
@@ -156,17 +218,6 @@ def execute_with_idempotency(
                     )
                 return {**durable_result, "replayed": True}
         return _indeterminate(operation_id, "prior_operation_outcome_unconfirmed")
-
-    capability = body.get("capability") or {}
-    signature = body.get("signature") or ""
-    required = body.get("required") or {}
-    caller = body.get("caller") or capability.get("audience") or ""
-    capability_id = capability.get("id", "") if isinstance(capability, dict) else ""
-    action = {
-        "type": required.get("type") if isinstance(required, dict) else None,
-        "resource": required.get("resource") if isinstance(required, dict) else None,
-        "method": required.get("method") if isinstance(required, dict) else None,
-    }
 
     intent = {
         "event_id": f"execute-operation.{operation_id}.intent",
@@ -204,7 +255,14 @@ def execute_with_idempotency(
         }
 
     try:
-        result = executor(capability, signature, required, caller)
+        result = executor(
+            capability,
+            signature,
+            required,
+            caller,
+            operation_id=operation_id,
+            request_digest=request_digest,
+        )
         if not isinstance(result, dict):
             raise TypeError("executor returned a non-object result")
     except Exception:
@@ -213,6 +271,20 @@ def execute_with_idempotency(
         except Exception:
             pass
         return _indeterminate(operation_id, "executor_outcome_unconfirmed")
+
+    if not _signed_executor_receipt_matches(
+        result,
+        operation_id=operation_id,
+        request_digest=request_digest,
+        capability_id=capability_id,
+        action=action,
+        verify_executor_receipt=verify_executor_receipt,
+    ):
+        try:
+            ledger.mark_indeterminate(operation_id, request_digest)
+        except Exception:
+            pass
+        return _indeterminate(operation_id, "executor_receipt_invalid_or_untrusted")
 
     durable_result = {
         **result,
