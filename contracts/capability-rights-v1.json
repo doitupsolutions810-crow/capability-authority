@@ -1,0 +1,17 @@
+{
+  "contract": "capability-rights-v1",
+  "authorization_rule": "Audience, expiry, type, resource, and method must match exactly.",
+  "method_wildcards": "unsupported",
+  "missing_requested_method": "deny",
+  "missing_granted_method": "deny",
+  "expiry_boundary": "deny when now_ts >= expires_at",
+  "malformed_expiry": "deny",
+  "attenuation": "child rights must be an exact subset of parent (type, resource, method) tuples",
+  "vectors": [
+    {"id":"read-exact","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"report.txt","method":"read"},"expected":true},
+    {"id":"method-escalation","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"report.txt","method":"delete"},"expected":false},
+    {"id":"resource-mismatch","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"secrets.txt","method":"read"},"expected":false},
+    {"id":"missing-request-method","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"report.txt"},"expected":false},
+    {"id":"missing-grant-method","granted":{"type":"file","resource":"report.txt"},"requested":{"type":"file","resource":"report.txt","method":"read"},"expected":false}
+  ]
+}
