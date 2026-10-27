@@ -34,7 +34,16 @@ class ExecutionContractTests(unittest.TestCase):
             "caller": "spiffe://test/agent",
         }
 
-    def executor(self, capability, signature, required, caller):
+    def executor(
+        self,
+        capability,
+        signature,
+        required,
+        caller,
+        *,
+        operation_id=None,
+        request_digest=None,
+    ):
         with self.executor_lock:
             self.executor_calls += 1
             number = self.executor_calls
@@ -43,9 +52,19 @@ class ExecutionContractTests(unittest.TestCase):
             "result": "executed",
             "receipt": {
                 "capability_id": capability["id"],
-                "action": f'{required["type"]}:{required["resource"]}:{required["method"]}',
+                "executor_id": "unit-test-executor",
+                "action": f'{required["type"]}:{required["resource"]}',
+                "action_identity": {
+                    "type": required["type"],
+                    "resource": required["resource"],
+                    "method": required.get("method"),
+                },
+                "operation_id": operation_id,
+                "request_digest": request_digest,
                 "outcome": "ok",
+                "timestamp": float(number),
                 "unit_sequence": number,
+                "signature": "unit-test-signature",
             },
         }
 
@@ -71,7 +90,7 @@ class ExecutionContractTests(unittest.TestCase):
                 and event.get("message_type") == message_type
             ]
 
-    def run_contract(self, body=None, *, executor=None):
+    def run_contract(self, body=None, *, executor=None, verify_receipt=None):
         body = body or self.body()
         return execute_with_idempotency(
             body,
@@ -82,6 +101,9 @@ class ExecutionContractTests(unittest.TestCase):
             ),
             query_intents=lambda operation_id: self.query(
                 operation_id, "ExecuteIntent", should_fail=self.fail_intent_query
+            ),
+            verify_executor_receipt=verify_receipt or (
+                lambda receipt, signature: signature == "unit-test-signature"
             ),
             ledger=self.ledger,
         )
@@ -197,7 +219,7 @@ class ExecutionContractTests(unittest.TestCase):
         release = threading.Event()
         first_result = {}
 
-        def blocking_executor(capability, signature, required, caller):
+        def blocking_executor(capability, signature, required, caller, *, operation_id=None, request_digest=None):
             with self.executor_lock:
                 self.executor_calls += 1
             started.set()
@@ -207,7 +229,17 @@ class ExecutionContractTests(unittest.TestCase):
             return {
                 "status": "ok",
                 "result": "executed",
-                "receipt": {"capability_id": capability["id"], "action": "resource:test-object:POST", "outcome": "ok"},
+                "receipt": {
+                    "capability_id": capability["id"],
+                    "executor_id": "unit-test-executor",
+                    "action": "resource:test-object",
+                    "action_identity": {"type": "resource", "resource": "test-object", "method": "POST"},
+                    "operation_id": operation_id,
+                    "request_digest": request_digest,
+                    "outcome": "ok",
+                    "timestamp": 1.0,
+                    "signature": "unit-test-signature",
+                },
             }
 
         thread = threading.Thread(
@@ -234,6 +266,45 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(replay["error"], "completed_receipt_missing_or_mismatched")
         self.assertEqual(self.executor_calls, 1)
 
+
+    def test_unsigned_or_untrusted_executor_receipt_never_becomes_success(self):
+        first = self.run_contract(verify_receipt=lambda receipt, signature: False)
+        self.assertEqual(first["status"], "indeterminate")
+        self.assertEqual(first["error"], "executor_receipt_invalid_or_untrusted")
+        self.assertFalse(first["retry_safe"])
+        self.assertEqual(self.executor_calls, 1)
+
+        retry = self.run_contract()
+        self.assertEqual(retry["status"], "indeterminate")
+        self.assertEqual(self.executor_calls, 1)
+
+    def test_signed_receipt_must_bind_the_exact_method_action(self):
+        def mismatched_executor(capability, signature, required, caller, *, operation_id=None, request_digest=None):
+            result = self.executor(
+                capability, signature, required, caller,
+                operation_id=operation_id, request_digest=request_digest,
+            )
+            result["receipt"]["action_identity"]["method"] = "DELETE"
+            return result
+
+        result = self.run_contract(executor=mismatched_executor)
+        self.assertEqual(result["status"], "indeterminate")
+        self.assertEqual(result["error"], "executor_receipt_invalid_or_untrusted")
+        self.assertEqual(self.executor_calls, 1)
+
+    def test_signed_receipt_must_bind_the_current_operation_and_request_digest(self):
+        def mismatched_executor(capability, signature, required, caller, *, operation_id=None, request_digest=None):
+            result = self.executor(
+                capability, signature, required, caller,
+                operation_id=operation_id, request_digest=request_digest,
+            )
+            result["receipt"]["operation_id"] = "another-operation"
+            return result
+
+        result = self.run_contract(executor=mismatched_executor)
+        self.assertEqual(result["status"], "indeterminate")
+        self.assertEqual(result["error"], "executor_receipt_invalid_or_untrusted")
+        self.assertEqual(self.executor_calls, 1)
 
     def test_uncertain_operations_are_not_reported_as_http_success(self):
         self.assertEqual(execution_http_status({"status": "indeterminate"}), 202)
