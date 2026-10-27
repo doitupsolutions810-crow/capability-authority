@@ -18,6 +18,7 @@ python3 tests/test_evidence_index_fail_closed.py
 python3 tests/test_evidence_index_projection_consistency.py
 python3 tests/test_evidence_recording_contract.py
 python3 tests/test_evidence_warehouse_concurrency.py
+python3 tests/test_execution_contract.py
 python3 tests/test_agents.py
 
 echo "==> demos"
