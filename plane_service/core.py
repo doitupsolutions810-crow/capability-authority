@@ -1,6 +1,6 @@
 """Pure capability core — issue / attenuate / verify. Amplification forbidden."""
 from __future__ import annotations
-import time, uuid
+import math, time, uuid
 from typing import Any, Optional
 
 def now() -> float:
@@ -25,18 +25,24 @@ def attenuate(cap, new_rights):
     return out
 
 def verify(cap, required, caller, now_ts=None):
-    """Fail closed unless type, resource, and method match exactly."""
+    """Fail closed unless audience, expiry, type, resource, and method match."""
     ts = now_ts if now_ts is not None else now()
     try:
         expires_at = float(cap.get("expires_at") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return False
-    if ts >= expires_at or cap.get("audience") not in (caller, "*"):
+    if not math.isfinite(expires_at) or ts >= expires_at:
         return False
+    if cap.get("audience") not in (caller, "*"):
+        return False
+    required_type = required.get("type")
+    required_resource = required.get("resource")
     method = required.get("method")
-    if not isinstance(method, str) or not method:
+    if not all(isinstance(value, str) and value for value in (required_type, required_resource, method)):
         return False
     for right in cap.get("rights") or []:
-        if right.get("type") == required.get("type") and right.get("resource") == required.get("resource") and right.get("method") == method:
+        if not isinstance(right, dict):
+            continue
+        if right.get("type") == required_type and right.get("resource") == required_resource and right.get("method") == method:
             return True
     return False
