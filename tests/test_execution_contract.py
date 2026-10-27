@@ -225,6 +225,15 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(first_result["status"], "ok")
         self.assertEqual(self.executor_calls, 1)
 
+    def test_completed_ledger_row_cannot_replace_missing_durable_receipt(self):
+        first = self.run_contract()
+        self.assertEqual(first["status"], "ok")
+        self.events.pop("execute-operation.op-123.receipt")
+        replay = self.run_contract()
+        self.assertEqual(replay["status"], "indeterminate")
+        self.assertEqual(replay["error"], "completed_receipt_missing_or_mismatched")
+        self.assertEqual(self.executor_calls, 1)
+
     @staticmethod
     def _digest_for(body):
         import hashlib
