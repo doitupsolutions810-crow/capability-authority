@@ -37,6 +37,7 @@ def execute_with_idempotency(
     executor: Callable[[dict, str, dict, str], dict],
     record_evidence: Callable[[dict], Any],
     query_receipts: Callable[[str], list[dict[str, Any]]],
+    query_intents: Callable[[str], list[dict[str, Any]]],
     ledger,
 ) -> dict[str, Any]:
     """Execute once per operation ID and require durable receipt read-back."""
@@ -128,9 +129,18 @@ def execute_with_idempotency(
     }
     try:
         record_evidence(intent)
+        persisted_intents = query_intents(operation_id)
+        intent_is_durable = any(
+            event.get("event_id") == intent["event_id"]
+            and event.get("message_type") == "ExecuteIntent"
+            and event.get("request_digest") == request_digest
+            for event in persisted_intents
+        )
+        if not intent_is_durable:
+            raise RuntimeError("durable ExecuteIntent could not be read back")
     except Exception:
-        # The executor has not been called, so this is the only state that may
-        # safely be retried automatically with the same operation ID.
+        # No external effect has been invoked yet. The operation may be retried
+        # only after the intent path is available; the caller keeps the same ID.
         try:
             ledger.mark_not_started(operation_id, request_digest)
         except Exception:
