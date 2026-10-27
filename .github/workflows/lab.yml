@@ -31,6 +31,11 @@ jobs:
         run: |
           python tests/test_plane.py
           python tests/test_evidence_receipt_spiffe.py
+          python tests/test_evidence_index_fail_closed.py
+          python tests/test_evidence_index_projection_consistency.py
+          python tests/test_evidence_recording_contract.py
+          python tests/test_evidence_warehouse_concurrency.py
+          python tests/test_execution_contract.py
           python tests/test_agents.py
       - name: Hands + agent demos
         run: |

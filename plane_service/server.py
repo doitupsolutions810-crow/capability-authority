@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ from plane_service.bounds import check_bounds, load_acceptance
 from plane_service.core import attenuate, issue, verify
 from plane_service.crypto_sign import public_key_b64, sign, verify_sig
 from plane_service.executor import Executor
+from plane_service.operation_ledger import OperationLedger
+from plane_service.execution_contract import execute_with_idempotency
+from plane_service.execution_contract import execution_http_status
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
 from plane_service.spiffe_identity import fetch_workload_identity
@@ -29,11 +33,27 @@ ISSUER = f"spiffe://{TRUST_DOMAIN}/broker"
 
 policy = PolicyEngine()
 executor = Executor()
+# The operation ledger is initialized lazily after server preflight, on the first
+# execution request. Importing the module must not create or migrate production data.
+_operation_ledger = None
+_operation_ledger_lock = threading.Lock()
+
+
+def _get_operation_ledger():
+    global _operation_ledger
+    if _operation_ledger is None:
+        with _operation_ledger_lock:
+            if _operation_ledger is None:
+                _operation_ledger = OperationLedger()
+    return _operation_ledger
+
+
 acceptance = load_acceptance()
 
+_EVIDENCE_BUS_ATTACHED = False
 try:
     from evidence.index import attach_to_attestpipe
-    attach_to_attestpipe()
+    _EVIDENCE_BUS_ATTACHED = bool(attach_to_attestpipe())
 except Exception as e:
     print(f"[evidence-index] startup skip: {e}")
 
@@ -50,16 +70,15 @@ except Exception as e:
 
 
 def _record_evidence(event: dict) -> None:
-    try:
-        from evidence.index import get_index
-        get_index().ingest(event)
-    except Exception as e:
-        print(f"[evidence] ingest skipped: {e}")
-    try:
+    # Exactly one recording path: publishing routes through the attached index
+    # subscriber; without that subscriber, ingest directly. Do not both ingest
+    # and publish the same event, which previously caused duplicate records.
+    if _EVIDENCE_BUS_ATTACHED:
         from attestpipe.bus import BUS
         BUS.publish(event)
-    except Exception as e:
-        print(f"[attestpipe] publish skipped: {e}")
+    else:
+        from evidence.index import get_index
+        get_index().ingest(event)
 
 
 def _bus_publish(msg) -> None:
@@ -142,23 +161,32 @@ def handle_verify(body: dict) -> dict:
     return {"status": "ok" if ok else "error", "valid": ok}
 
 
+def _query_operation_events(operation_id: str, message_type: str) -> list[dict]:
+    from evidence.index import get_index
+    return get_index().query(
+        request_id=operation_id,
+        message_type=message_type,
+        limit=10,
+    )
+
+
+def _verify_executor_receipt(receipt_body: dict, signature: str) -> bool:
+    try:
+        return verify_sig(receipt_body, signature)
+    except Exception:
+        return False
+
+
 def handle_execute(body: dict) -> dict:
-    cap = body.get("capability") or {}
-    sig = body.get("signature") or ""
-    required = body.get("required") or {}
-    caller = body.get("caller") or cap.get("audience") or ""
-    result = executor.execute(cap, sig, required, caller)
-    if result.get("status") == "ok":
-        receipt = result.get("receipt") or {}
-        _record_evidence(
-            {
-                "message_type": "ExecuteReceipt",
-                "capability_id": cap.get("id", ""),
-                "action": receipt.get("action", ""),
-                "outcome": receipt.get("outcome", ""),
-            }
-        )
-    return result
+    return execute_with_idempotency(
+        body,
+        executor=executor.execute,
+        record_evidence=_record_evidence,
+        query_receipts=lambda operation_id: _query_operation_events(operation_id, "ExecuteReceipt"),
+        query_intents=lambda operation_id: _query_operation_events(operation_id, "ExecuteIntent"),
+        verify_executor_receipt=_verify_executor_receipt,
+        ledger=_get_operation_ledger(),
+    )
 
 
 def handle_agent_mount(body: dict) -> dict:
@@ -221,11 +249,28 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         try:
             body = json.loads(raw.decode() or "{}")
+            if not isinstance(body, dict):
+                self._json(400, {"status": "error", "error": "request_body_must_be_object"})
+                return
+            if path == "/v1/execute":
+                header_id = (self.headers.get("Idempotency-Key") or "").strip()
+                if header_id:
+                    supplied_id = body.get("operation_id")
+                    if supplied_id not in (None, "", header_id):
+                        self._json(400, {
+                            "status": "error",
+                            "error": "idempotency_key_mismatch",
+                            "retry_safe": False,
+                        })
+                        return
+                    body["operation_id"] = header_id
             fn = ROUTES.get(path)
             if not fn:
                 self._json(404, {"status": "error", "error": "unknown path"})
                 return
-            self._json(200, fn(body))
+            result = fn(body)
+            status_code = execution_http_status(result) if path == "/v1/execute" else 200
+            self._json(status_code, result)
         except Exception as e:
             self._json(500, {"status": "error", "error": str(e)})
 
