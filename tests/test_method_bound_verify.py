@@ -45,3 +45,14 @@ def test_verify_preserves_resource_only_compatibility():
         "spiffe://prod/agent/avrone",
         now_ts=1_900_000_000,
     )
+
+
+def test_verify_rejects_capability_at_exact_expiry():
+    capability = _capability()
+    capability["expires_at"] = 1_900_000_000
+    assert not verify(
+        capability,
+        {"type": "Execute", "resource": "task.run_tests", "method": "POST"},
+        "spiffe://prod/agent/avrone",
+        now_ts=1_900_000_000,
+    )
