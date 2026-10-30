@@ -40,7 +40,7 @@ def attenuate(cap, new_rights):
 
 def verify(cap, required, caller, now_ts=None):
     ts = now_ts if now_ts is not None else now()
-    if ts > float(cap.get("expires_at") or 0):
+    if ts >= float(cap.get("expires_at") or 0):
         return False
     if cap.get("audience") not in (caller, "*"):
         return False
