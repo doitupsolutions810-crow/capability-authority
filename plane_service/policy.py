@@ -16,6 +16,9 @@ DEFAULT_ALLOWED_RIGHTS = frozenset({
     ("read", "demo", None),
     ("Execute", "tool.echo", None),
     ("Execute", "tool.summarize", None),
+    ("Execute", "task.run_tests", None),
+    ("Execute", "task.build_artifact", None),
+    ("Execute", "task.analyze_repository", None),
 })
 
 
