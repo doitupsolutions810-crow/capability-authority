@@ -23,13 +23,18 @@ def resolve_issue_identity(
     if ident.source == "workload-api":
         return ident
 
-    if required and ident.source == "fallback":
+    if required and ident.source != "workload-api":
         raise SpiffeBindingError(
-            "SPIFFE_REQUIRED=1 but Workload API SVID unavailable "
+            "production requires a Workload API X509-SVID; "
+            f"identity source was {ident.source!r} "
             f"(socket={os.environ.get('SPIFFE_ENDPOINT_SOCKET')})"
         )
 
-    allow_override = os.environ.get("PLANE_ALLOW_CALLER_OVERRIDE", "0") == "1"
+    # Caller-provided identities are a development-only compatibility path.
+    allow_override = (
+        not required
+        and os.environ.get("PLANE_ALLOW_CALLER_OVERRIDE", "0") == "1"
+    )
     if body_caller and allow_override and ident.source in ("env", "fallback"):
         from .spiffe_identity import _parse_trust_domain
 
