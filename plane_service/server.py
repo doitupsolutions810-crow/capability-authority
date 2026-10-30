@@ -81,7 +81,10 @@ def handle_issue(body: dict) -> dict:
     identity = fetch_workload_identity(trust_domain_cfg=TRUST_DOMAIN)
     caller = body.get("caller") or identity.spiffe_id
     rights = body.get("rights") or []
-    ttl = min(int(body.get("ttl_seconds") or 120), 300)
+    raw_ttl = body.get("ttl_seconds", 120)
+    if isinstance(raw_ttl, bool) or not isinstance(raw_ttl, int):
+        return {"status": "error", "error": "TTL must be an integer"}
+    ttl = min(raw_ttl, 300)
     constraints = dict(body.get("constraints") or {})
     try:
         policy.authorize(caller, rights, constraints, ttl)
