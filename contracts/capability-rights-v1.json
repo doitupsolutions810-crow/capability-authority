@@ -1,0 +1,22 @@
+{
+  "contract": "capability-rights-v1",
+  "authorization_rule": "Audience, finite expiry, type, resource, and method must match exactly.",
+  "method_wildcards": "unsupported",
+  "audience_wildcards": "unsupported",
+  "missing_requested_method": "deny",
+  "missing_requested_type_or_resource": "deny",
+  "missing_granted_method": "deny",
+  "expiry_boundary": "deny when now_ts >= expires_at",
+  "malformed_or_nonfinite_expiry": "deny",
+  "malformed_inputs": "deny; capability and requested rights must be objects; caller and timestamps must be well-typed",
+  "attenuation": "child rights must be an exact subset of parent (type, resource, method) tuples",
+  "vectors": [
+    {"id":"read-exact","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"report.txt","method":"read"},"expected":true},
+    {"id":"method-escalation","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"report.txt","method":"delete"},"expected":false},
+    {"id":"resource-mismatch","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"secrets.txt","method":"read"},"expected":false},
+    {"id":"missing-request-method","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","resource":"report.txt"},"expected":false},
+    {"id":"missing-request-type","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"resource":"report.txt","method":"read"},"expected":false},
+    {"id":"missing-request-resource","granted":{"type":"file","resource":"report.txt","method":"read"},"requested":{"type":"file","method":"read"},"expected":false},
+    {"id":"missing-grant-method","granted":{"type":"file","resource":"report.txt"},"requested":{"type":"file","resource":"report.txt","method":"read"},"expected":false}
+  ]
+}
