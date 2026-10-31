@@ -1,7 +1,7 @@
 """Server-owned capability policy.
 
-The model/requester may request rights, but only this allowlist can be issued.
-Keep the list deliberately small; add new resources through reviewed code changes.
+The requester may request rights, but only exact method-scoped entries in
+this allowlist can be issued. No methodless or wildcard rights are accepted.
 """
 from __future__ import annotations
 
@@ -13,18 +13,18 @@ class PolicyError(Exception):
 
 
 DEFAULT_ALLOWED_RIGHTS = frozenset({
-    ("read", "demo", None),
-    ("Execute", "tool.echo", None),
-    ("Execute", "tool.summarize", None),
-    ("Execute", "task.run_tests", None),
-    ("Execute", "task.build_artifact", None),
-    ("Execute", "task.analyze_repository", None),
+    ("read", "demo", "GET"),
+    ("Execute", "tool.echo", "POST"),
+    ("Execute", "tool.summarize", "POST"),
+    ("Execute", "task.run_tests", "POST"),
+    ("Execute", "task.build_artifact", "POST"),
+    ("Execute", "task.analyze_repository", "POST"),
 })
 
 
 class PolicyEngine:
     def __init__(self, max_ttl=300, allowed_prefixes=None,
-                 allowed_rights: Iterable[tuple[str, str, str | None]] | None = None):
+                 allowed_rights: Iterable[tuple[str, str, str]] | None = None):
         self.max_ttl = max_ttl
         self.allowed_prefixes = tuple(allowed_prefixes or (
             "spiffe://prod/agent/", "spiffe://prod/broker/"
@@ -50,14 +50,10 @@ class PolicyEngine:
         for right in rights:
             if not isinstance(right, dict):
                 raise PolicyError("each capability right must be an object")
-            if set(right) - {"type", "resource", "method"}:
-                raise PolicyError("capability right contains unsupported fields")
-            kind, resource, method = (
-                right.get("type"), right.get("resource"), right.get("method")
-            )
-            if not isinstance(kind, str) or not isinstance(resource, str):
-                raise PolicyError("capability right requires string type and resource")
-            if method is not None and not isinstance(method, str):
-                raise PolicyError("capability method must be a string")
+            if set(right) != {"type", "resource", "method"}:
+                raise PolicyError("capability right requires exactly type, resource, and method")
+            kind, resource, method = right.get("type"), right.get("resource"), right.get("method")
+            if not all(isinstance(v, str) and v.strip() for v in (kind, resource, method)):
+                raise PolicyError("capability type, resource, and method must be non-empty strings")
             if (kind, resource, method) not in self.allowed_rights:
-                raise PolicyError(f"right not allowlisted: {kind}:{resource}")
+                raise PolicyError(f"right not allowlisted: {kind}:{resource}:{method}")

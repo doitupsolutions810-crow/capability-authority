@@ -62,12 +62,14 @@ def test_policy_allowlist_and_bounds():
     from plane_service.policy import PolicyEngine, PolicyError
     policy = PolicyEngine()
     caller = "spiffe://prod/agent/avrone"
-    policy.authorize(caller, [{"type": "Execute", "resource": "tool.echo"}], {}, 60)
+    policy.authorize(caller, [{"type": "Execute", "resource": "tool.echo", "method": "POST"}], {}, 60)
     for rights in (
-        [{"type": "Execute", "resource": "shell"}],
-        [{"type": "Execute", "resource": "docker.sock"}],
-        [{"type": "admin", "resource": "*"}],
-        [{"type": "Execute", "resource": "tool.unknown"}],
+        [{"type": "Execute", "resource": "tool.echo", "method": "GET"}],
+        [{"type": "Execute", "resource": "shell", "method": "POST"}],
+        [{"type": "Execute", "resource": "docker.sock", "method": "POST"}],
+        [{"type": "admin", "resource": "*", "method": "*"}],
+        [{"type": "Execute", "resource": "tool.unknown", "method": "POST"}],
+        [{"type": "read", "resource": "demo"}],
     ):
         try:
             policy.authorize(caller, rights, {}, 60)
@@ -76,7 +78,7 @@ def test_policy_allowlist_and_bounds():
         _fail(f"unapproved right granted: {rights}")
     for ttl in (0, -1, 301, True, "60"):
         try:
-            policy.authorize(caller, [{"type": "read", "resource": "demo"}], {}, ttl)
+            policy.authorize(caller, [{"type": "read", "resource": "demo", "method": "GET"}], {}, ttl)
         except PolicyError:
             continue
         _fail(f"invalid TTL accepted: {ttl}")
