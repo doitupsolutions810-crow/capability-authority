@@ -1,9 +1,11 @@
-import hashlib, json
+import base64, hashlib, json
 import attestpipe.bus as bus
 import evidence.index as idxmod
 import evidence.warehouse as whmod
 import plane_service.server as api
 import plane_service.executor as executor_module
+import plane_service.crypto_sign as crypto_sign
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from evidence.index import EvidenceIndex
 from evidence.warehouse import EvidenceWarehouse
 from plane_service.crypto_sign import verify_sig
@@ -47,6 +49,15 @@ def test_correlated_capability_receipt_and_durable_chain(tmp_path, monkeypatch):
     assert conflict["error"] == "correlation_id_replay_conflict"
 
 def test_allowlisted_artifact_dispatch_has_signed_side_effect(tmp_path, monkeypatch):
+    # Deterministic test signer; verification below uses a separately pinned
+    # public-key constant rather than the service's verify_sig helper.
+    fixture_private = Ed25519PrivateKey.from_private_bytes(bytes(range(32)))
+    monkeypatch.setattr(crypto_sign, "_KEY", fixture_private)
+    monkeypatch.setattr(crypto_sign, "_PUB", fixture_private.public_key())
+    pinned_public_key_b64 = "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg="
+    pinned_public_key = Ed25519PublicKey.from_public_bytes(
+        base64.b64decode(pinned_public_key_b64)
+    )
     index = EvidenceIndex(tmp_path / "index.json")
     warehouse = EvidenceWarehouse(tmp_path / "chain.sqlite")
     monkeypatch.setattr(idxmod, "get_index", lambda: index)
@@ -81,7 +92,7 @@ def test_allowlisted_artifact_dispatch_has_signed_side_effect(tmp_path, monkeypa
     assert receipt["outcome"] == "succeeded"
     assert receipt["action"] == "Execute:artifact.write_demo:POST"
     signature = receipt.pop("signature")
-    assert verify_sig(receipt, signature)
+    pinned_public_key.verify(base64.b64decode(signature), crypto_sign.canonical(receipt))
     receipt["signature"] = signature
 
     artifact_path = tmp_path / "dispatcher" / f"{corr}.json"
