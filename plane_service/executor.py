@@ -64,6 +64,12 @@ class Executor:
         unsigned.pop("signature", None)
         if not verify_sig(unsigned, signature):
             raise RuntimeError("existing artifact receipt signature is invalid")
+        if envelope.get("schema") != "avrone.execution-artifact/v1":
+            raise RuntimeError("existing artifact schema is not supported")
+        payload_bytes = payload.encode("utf-8") if isinstance(payload, str) else b""
+        actual_result_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
+        if receipt.get("result_digest") != actual_result_digest:
+            raise RuntimeError("existing artifact payload digest does not match its receipt")
         if receipt.get("payload_digest") != payload_digest:
             raise RuntimeError("correlation_id already belongs to a different payload")
         return {
