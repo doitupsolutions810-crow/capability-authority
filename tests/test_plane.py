@@ -50,8 +50,10 @@ def test_issue_sign_execute():
     if not verify_sig(cap, sig) or not verify(cap, rights[0], caller):
         _fail("sig/verify")
     out = Executor().execute(cap, sig, rights[0], caller)
-    if out.get("status") != "ok":
-        _fail(str(out))
+    if out.get("status") != "authorized" or out.get("result") != "not_executed":
+        _fail(f"authorization gate must not claim execution: {out}")
+    if out.get("receipt", {}).get("outcome") != "authorized_not_executed":
+        _fail(f"receipt outcome must state no execution: {out}")
     denied = Executor().execute(cap, sig, {"type": "read", "resource": "demo", "method": "DELETE"}, caller)
     if denied.get("status") == "ok":
         _fail("wrong method executed")

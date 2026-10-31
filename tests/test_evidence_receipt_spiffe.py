@@ -26,8 +26,10 @@ def test_receipt_verify_cli():
     rights = [{"type": "read", "resource": "demo", "method": "GET"}]
     cap = issue(caller, "spiffe://prod/broker", rights, {}, 60, "prod", "dev:unattested", 1)
     out = Executor().execute(cap, sign(cap), rights[0], caller)
-    if out.get("status") != "ok":
-        _fail(str(out))
+    if out.get("status") != "authorized" or out.get("result") != "not_executed":
+        _fail(f"authorization gate must not claim execution: {out}")
+    if out.get("receipt", {}).get("outcome") != "authorized_not_executed":
+        _fail(f"receipt must state no execution: {out}")
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
         json.dump({"receipt": out["receipt"]}, f)
         path = f.name

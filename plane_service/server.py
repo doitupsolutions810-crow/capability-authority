@@ -170,14 +170,15 @@ def handle_execute(body: dict) -> dict:
     required = body.get("required") or {}
     caller = body.get("caller") or cap.get("audience") or ""
     result = executor.execute(cap, sig, required, caller)
-    if result.get("status") == "ok":
+    if result.get("status") == "authorized":
         receipt = result.get("receipt") or {}
         _record_evidence(
             {
-                "message_type": "ExecuteReceipt",
+                "message_type": "AuthorizationReceipt",
                 "capability_id": cap.get("id", ""),
                 "action": receipt.get("action", ""),
                 "outcome": receipt.get("outcome", ""),
+                "receipt": receipt,
             }
         )
     return result

@@ -22,6 +22,8 @@ class RateLimiter:
 
 
 class Executor:
+    """Authorization verifier only; no action dispatcher is wired in this service."""
+
     def __init__(self):
         self.rate_limiter = RateLimiter()
         self.crl = set()
@@ -46,19 +48,23 @@ class Executor:
         if not self.rate_limiter.allow(key, int(rl.get("count") or 5), int(rl.get("window_seconds") or 60)):
             return {"status": "error", "error": "rate limited"}
 
-        # This receipt records the exact authorization tuple. It is not by
-        # itself a cross-system history-chain receipt; a durable receipt
-        # service must add correlation, payload digest, and chain ancestry.
+        # Authorization is proven; execution is not implemented. This signed
+        # receipt deliberately records that no side effect was dispatched.
         receipt = {
             "capability_id": cap["id"],
             "issuer": cap.get("issuer"),
             "audience": caller,
-            "executor_id": "plane-executor-1",
+            "executor_id": "plane-authorization-gate-1",
             "action": f"{kind}:{resource}:{method}",
             "resource": resource,
             "method": method,
-            "outcome": "ok",
+            "outcome": "authorized_not_executed",
             "timestamp": time.time(),
         }
         receipt["signature"] = sign(receipt)
-        return {"status": "ok", "result": "executed", "receipt": receipt}
+        return {
+            "status": "authorized",
+            "result": "not_executed",
+            "execution_status": "NOT_IMPLEMENTED",
+            "receipt": receipt,
+        }
