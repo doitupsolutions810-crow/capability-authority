@@ -52,6 +52,7 @@ def test_allowlisted_artifact_dispatch_has_signed_side_effect(tmp_path, monkeypa
     monkeypatch.setattr(idxmod, "get_index", lambda: index)
     monkeypatch.setattr(whmod, "get_warehouse", lambda: warehouse)
     monkeypatch.setattr(bus, "BUS", Bus(index))
+    monkeypatch.setattr(executor_module, "ROOT", tmp_path)
     monkeypatch.setattr(executor_module, "ARTIFACT_DIR", tmp_path / "dispatcher")
 
     corr = "artifact-write-e2e-001"
