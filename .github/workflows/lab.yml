@@ -14,13 +14,20 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       PYTHONPATH: .
       PRODUCTION: "0"
       SPIFFE_REQUIRED: "0"
       ALLOW_ADMIN_DESTRUCTIVE_ACTIONS: "false"
     steps:
+      - name: Runner preflight
+        run: |
+          echo "runner=${RUNNER_NAME}"
+          echo "os=${RUNNER_OS} arch=${RUNNER_ARCH}"
+          python3 --version || true
+          uname -a
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
