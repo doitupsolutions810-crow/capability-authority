@@ -1,4 +1,4 @@
-import base64, hashlib, json
+import base64, hashlib, json, sqlite3
 import attestpipe.bus as bus
 import evidence.index as idxmod
 import evidence.warehouse as whmod
@@ -110,6 +110,36 @@ def test_allowlisted_artifact_dispatch_has_signed_side_effect(tmp_path, monkeypa
     assert rows[0]["result"] == result["result"]
     assert warehouse.verify_chain()["ok"] is True
     assert warehouse.verify_chain()["length"] == 2
+
+    # Independently recompute the persisted SQLite chain without calling
+    # EvidenceWarehouse.verify_chain(), and bind its receipt event to the
+    # independently verified artifact receipt above.
+    with sqlite3.connect(str(warehouse.db_path)) as connection:
+        persisted = connection.execute(
+            "SELECT payload, prev_digest, digest FROM evidence ORDER BY id"
+        ).fetchall()
+    previous = "0" * 64
+    independently_verified_events = []
+    for payload_json, stored_previous, stored_digest in persisted:
+        event = json.loads(payload_json)
+        canonical_event = json.dumps(
+            event, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+        expected_digest = hashlib.sha256(
+            previous.encode("utf-8") + canonical_event
+        ).hexdigest()
+        assert stored_previous == previous
+        assert stored_digest == expected_digest
+        independently_verified_events.append(event)
+        previous = expected_digest
+
+    receipt_events = [
+        event for event in independently_verified_events
+        if event.get("correlation_id") == corr
+        and event.get("message_type") == "AuthorizationReceipt"
+    ]
+    assert len(receipt_events) == 1
+    assert receipt_events[0]["receipt"] == receipt
 
     replay = api.handle_execute(request)
     assert replay["status"] == "executed"
