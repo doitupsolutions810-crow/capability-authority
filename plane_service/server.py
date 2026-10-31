@@ -72,6 +72,8 @@ def _record_evidence(event: dict) -> dict:
         rows = index.query(
             capability_id=event.get("capability_id"),
             message_type=event["message_type"],
+            correlation_id=event.get("correlation_id"),
+            message_id=event.get("message_id"),
             limit=1,
         )
         if not rows:
