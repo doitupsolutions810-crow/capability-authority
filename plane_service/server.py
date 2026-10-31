@@ -195,6 +195,7 @@ def handle_execute(body: dict) -> dict:
     if not verify(cap, required, caller):
         return {"status": "error", "error": "verify failed"}
 
+
     from evidence.index import get_index
     index = get_index()
     prior = index.query(
@@ -205,12 +206,13 @@ def handle_execute(body: dict) -> dict:
     action = f"{required.get('type')}:{required.get('resource')}:{required.get('method')}"
     if prior:
         prior_receipt = prior[0].get("receipt") or {}
-        if prior_receipt.get("action") != action or prior_receipt.get("capability_id") != cap.get("id"):
+        if (prior_receipt.get("action") != action or prior_receipt.get("capability_id") != cap.get("id") or prior_receipt.get("payload_digest") != payload_digest):
             return {"status": "error", "error": "correlation_id_replay_conflict"}
+        executed = prior_receipt.get("outcome") == "succeeded"
         return {
-            "status": "authorized",
-            "result": "not_executed",
-            "execution_status": "NOT_IMPLEMENTED",
+            "status": "executed" if executed else "authorized",
+            "result": prior[0].get("result") if executed else "not_executed",
+            "execution_status": "SUCCEEDED" if executed else "NOT_IMPLEMENTED",
             "idempotent_replay": True,
             "receipt": prior_receipt,
         }
@@ -239,16 +241,17 @@ def handle_execute(body: dict) -> dict:
         payload_digest=payload_digest,
         previous_receipt_digest=previous_receipt_digest,
     )
-    if result.get("status") == "authorized":
+    if result.get("status") in ("authorized", "executed"):
         receipt = result.get("receipt") or {}
         _record_evidence(
             {
                 "message_type": "AuthorizationReceipt",
-                "message_id": message_id,
+                "message_id": receipt.get("message_id", message_id),
                 "correlation_id": correlation_id,
                 "capability_id": cap.get("id", ""),
                 "action": receipt.get("action", ""),
                 "outcome": receipt.get("outcome", ""),
+                "result": result.get("result"),
                 "receipt": receipt,
             }
         )
