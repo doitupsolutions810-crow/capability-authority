@@ -185,6 +185,13 @@ def handle_execute(body: dict) -> dict:
     if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
         return {"status": "error", "error": "correlation_id is required (1..128 characters)"}
 
+    if not verify_sig(cap, sig):
+        return {"status": "error", "error": "invalid signature"}
+    if check_bounds(cap, acceptance):
+        return {"status": "error", "error": "capability bounds rejected"}
+    if not verify(cap, required, caller):
+        return {"status": "error", "error": "verify failed"}
+
     from evidence.index import get_index
     index = get_index()
     prior = index.query(
