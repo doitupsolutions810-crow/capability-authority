@@ -5,19 +5,37 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+
 def _fail(msg):
     print("FAIL", msg)
     raise SystemExit(1)
 
+
 def test_no_amplification():
     from plane_service.core import issue, attenuate
-    cap = issue("spiffe://prod/agent/dev", "spiffe://prod/broker", [{"type": "read", "resource": "demo"}], {}, 60, "prod", "dev:unattested", 1)
+    cap = issue("spiffe://prod/agent/dev", "spiffe://prod/broker", [{"type": "read", "resource": "demo", "method": "GET"}], {}, 60, "prod", "dev:unattested", 1)
     try:
-        attenuate(cap, [{"type": "Execute", "resource": "tool.echo"}])
+        attenuate(cap, [{"type": "Execute", "resource": "tool.echo", "method": "POST"}])
     except ValueError:
         print("PASS no_amplification")
         return
     _fail("amplification was allowed")
+
+
+def test_method_scoped_verification():
+    from plane_service.core import issue, verify
+    caller = "spiffe://prod/agent/dev"
+    rights = [{"type": "read", "resource": "demo", "method": "GET"}]
+    cap = issue(caller, "spiffe://prod/broker", rights, {}, 60, "prod", "dev:unattested", 1)
+    assert verify(cap, rights[0], caller)
+    assert not verify(cap, {"type": "read", "resource": "demo", "method": "POST"}, caller)
+    assert not verify(cap, {"type": "read", "resource": "demo"}, caller)
+    assert not verify(cap, {"type": "write", "resource": "demo", "method": "GET"}, caller)
+    assert not verify(cap, rights[0], "spiffe://prod/agent/other")
+    assert not verify({**cap, "expires_at": 100}, rights[0], caller, now_ts=100)
+    assert not verify({**cap, "expires_at": float("nan")}, rights[0], caller)
+    print("PASS method_scoped_verification")
+
 
 def test_issue_sign_execute():
     from plane_service.core import issue, verify
@@ -25,7 +43,7 @@ def test_issue_sign_execute():
     from plane_service.executor import Executor
     from plane_service.policy import PolicyEngine
     caller = "spiffe://prod/agent/dev"
-    rights = [{"type": "read", "resource": "demo"}]
+    rights = [{"type": "read", "resource": "demo", "method": "GET"}]
     PolicyEngine().authorize(caller, rights, {}, 60)
     cap = issue(caller, "spiffe://prod/broker", rights, {}, 60, "prod", "dev:unattested", 1)
     sig = sign(cap)
@@ -34,7 +52,11 @@ def test_issue_sign_execute():
     out = Executor().execute(cap, sig, rights[0], caller)
     if out.get("status") != "ok":
         _fail(str(out))
+    denied = Executor().execute(cap, sig, {"type": "read", "resource": "demo", "method": "DELETE"}, caller)
+    if denied.get("status") == "ok":
+        _fail("wrong method executed")
     print("PASS issue_sign_execute")
+
 
 def test_policy_allowlist_and_bounds():
     from plane_service.policy import PolicyEngine, PolicyError
@@ -68,6 +90,7 @@ def test_hands_deny():
             _fail(h)
     print("PASS hands_deny")
 
+
 def test_prod_preflight_fail_closed():
     os.environ["PRODUCTION"] = "1"
     os.environ.pop("PLANE_SPIFFE_ID", None)
@@ -78,13 +101,16 @@ def test_prod_preflight_fail_closed():
         _fail("should fail closed")
     print("PASS prod_preflight_fail_closed")
 
+
 def main():
     test_no_amplification()
+    test_method_scoped_verification()
     test_issue_sign_execute()
     test_policy_allowlist_and_bounds()
     test_hands_deny()
     test_prod_preflight_fail_closed()
     print("ALL PASS")
+
 
 if __name__ == "__main__":
     main()
