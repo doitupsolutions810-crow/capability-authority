@@ -188,7 +188,6 @@ def handle_execute(body: dict) -> dict:
     from evidence.index import get_index
     index = get_index()
     prior = index.query(
-        capability_id=cap.get("id"),
         message_type="AuthorizationReceipt",
         correlation_id=correlation_id,
         limit=1,
@@ -355,6 +354,8 @@ class Handler(BaseHTTPRequestHandler):
                 request_id=(q.get("request_id") or [None])[0],
                 actor=(q.get("actor") or [None])[0],
                 message_type=(q.get("message_type") or [None])[0],
+                correlation_id=(q.get("correlation_id") or [None])[0],
+                message_id=(q.get("message_id") or [None])[0],
                 limit=int((q.get("limit") or ["20"])[0]),
             )
             self._json(200, {"count": len(rows), "results": rows})
