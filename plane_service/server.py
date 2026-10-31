@@ -180,10 +180,13 @@ def handle_execute(body: dict) -> dict:
     cap = body.get("capability") or {}
     sig = body.get("signature") or ""
     required = body.get("required") or {}
+    action_input = body.get("input") or {}
     caller = body.get("caller") or cap.get("audience") or ""
     correlation_id = body.get("correlation_id")
     if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
         return {"status": "error", "error": "correlation_id is required (1..128 characters)"}
+    if not isinstance(action_input, dict):
+        return {"status": "error", "error": "input must be an object"}
 
     if not verify_sig(cap, sig):
         return {"status": "error", "error": "invalid signature"}
@@ -213,7 +216,7 @@ def handle_execute(body: dict) -> dict:
         }
 
     message_id = uuid.uuid4().hex
-    payload_bytes = json.dumps(required, sort_keys=True, separators=(",", ":")).encode()
+    payload_bytes = json.dumps({"required": required, "input": action_input}, sort_keys=True, separators=(",", ":")).encode()
     payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
     previous_receipt_digest = None
     prior_receipts = index.query(
@@ -232,6 +235,7 @@ def handle_execute(body: dict) -> dict:
         cap, sig, required, caller,
         message_id=message_id,
         correlation_id=correlation_id,
+        action_input=action_input,
         payload_digest=payload_digest,
         previous_receipt_digest=previous_receipt_digest,
     )
