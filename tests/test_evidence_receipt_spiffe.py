@@ -23,7 +23,7 @@ def test_receipt_verify_cli():
     from plane_service.crypto_sign import sign
     from plane_service.executor import Executor
     caller = "spiffe://prod/agent/dev"
-    rights = [{"type": "read", "resource": "demo"}]
+    rights = [{"type": "read", "resource": "demo", "method": "GET"}]
     cap = issue(caller, "spiffe://prod/broker", rights, {}, 60, "prod", "dev:unattested", 1)
     out = Executor().execute(cap, sign(cap), rights[0], caller)
     if out.get("status") != "ok":

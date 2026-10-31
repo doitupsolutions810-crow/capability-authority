@@ -4,16 +4,28 @@ from __future__ import annotations
 import math
 import time
 import uuid
-from typing import Any, Optional
 
 
 def now() -> float:
     return time.time()
 
 
+def _validate_rights(rights):
+    if not isinstance(rights, list) or not rights:
+        raise ValueError("rights must be a non-empty list")
+    for right in rights:
+        if not isinstance(right, dict):
+            raise ValueError("each right must be an object")
+        for field in ("type", "resource", "method"):
+            value = right.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"right.{field} is required; wildcard methods are not supported")
+
+
 def issue(caller, issuer, rights, constraints, ttl_seconds, trust_domain, broker_measurement, policy_version):
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
         raise ValueError("ttl_seconds must be a positive integer")
+    _validate_rights(rights)
     issued_at = now()
     return {
         "id": str(uuid.uuid4()),
@@ -33,6 +45,7 @@ def issue(caller, issuer, rights, constraints, ttl_seconds, trust_domain, broker
 
 
 def attenuate(cap, new_rights):
+    _validate_rights(new_rights)
     old = {(r.get("type"), r.get("resource"), r.get("method")) for r in cap.get("rights") or []}
     for right in new_rights:
         key = (right.get("type"), right.get("resource"), right.get("method"))
@@ -60,13 +73,13 @@ def verify(cap, required, caller, now_ts=None):
         required_type = required.get("type")
         required_resource = required.get("resource")
         required_method = required.get("method")
+        if not all(isinstance(v, str) and v.strip() for v in (required_type, required_resource, required_method)):
+            return False
         for right in cap.get("rights") or []:
-            if right.get("type") != required_type or right.get("resource") != required_resource:
-                continue
-            # Missing method is not a wildcard. Both sides must agree exactly.
-            if right.get("method") != required_method:
-                continue
-            return True
+            if (right.get("type"), right.get("resource"), right.get("method")) == (
+                required_type, required_resource, required_method
+            ):
+                return True
         return False
     except (TypeError, ValueError, AttributeError):
         return False
