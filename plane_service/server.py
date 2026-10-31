@@ -2,7 +2,9 @@
 """Broker + Executor HTTP service. Frozen OpenAPI paths."""
 from __future__ import annotations
 
+import hashlib
 import json
+import uuid
 import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -120,9 +122,15 @@ def handle_issue(body: dict) -> dict:
         policy_version=POLICY_VERSION,
     )
     sig = sign(cap)
+    correlation_id = body.get("correlation_id") or uuid.uuid4().hex
+    if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
+        return {"status": "error", "error": "correlation_id must be a non-empty string up to 128 characters"}
+    issue_message_id = uuid.uuid4().hex
     _record_evidence(
         {
             "message_type": "CapabilityIssued",
+            "message_id": issue_message_id,
+            "correlation_id": correlation_id,
             "capability_id": cap["id"],
             "audience": cap.get("audience", ""),
             "issuer": cap.get("issuer", ""),
@@ -130,6 +138,8 @@ def handle_issue(body: dict) -> dict:
     )
     return {
         "status": "ok",
+        "message_id": issue_message_id,
+        "correlation_id": correlation_id,
         "capability": cap,
         "signature": sig,
         "platform": os.environ.get("PLANE_PLATFORM", "dev"),
@@ -169,12 +179,61 @@ def handle_execute(body: dict) -> dict:
     sig = body.get("signature") or ""
     required = body.get("required") or {}
     caller = body.get("caller") or cap.get("audience") or ""
-    result = executor.execute(cap, sig, required, caller)
+    correlation_id = body.get("correlation_id")
+    if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
+        return {"status": "error", "error": "correlation_id is required (1..128 characters)"}
+
+    from evidence.index import get_index
+    index = get_index()
+    prior = index.query(
+        capability_id=cap.get("id"),
+        message_type="AuthorizationReceipt",
+        correlation_id=correlation_id,
+        limit=1,
+    )
+    action = f"{required.get('type')}:{required.get('resource')}:{required.get('method')}"
+    if prior:
+        prior_receipt = prior[0].get("receipt") or {}
+        if prior_receipt.get("action") != action or prior_receipt.get("capability_id") != cap.get("id"):
+            return {"status": "error", "error": "correlation_id_replay_conflict"}
+        return {
+            "status": "authorized",
+            "result": "not_executed",
+            "execution_status": "NOT_IMPLEMENTED",
+            "idempotent_replay": True,
+            "receipt": prior_receipt,
+        }
+
+    message_id = uuid.uuid4().hex
+    payload_bytes = json.dumps(required, sort_keys=True, separators=(",", ":")).encode()
+    payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
+    previous_receipt_digest = None
+    prior_receipts = index.query(
+        capability_id=cap.get("id"),
+        message_type="AuthorizationReceipt",
+        limit=1,
+    )
+    if prior_receipts:
+        previous = prior_receipts[0].get("receipt") or {}
+        if previous:
+            previous_receipt_digest = "sha256:" + hashlib.sha256(
+                json.dumps(previous, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+
+    result = executor.execute(
+        cap, sig, required, caller,
+        message_id=message_id,
+        correlation_id=correlation_id,
+        payload_digest=payload_digest,
+        previous_receipt_digest=previous_receipt_digest,
+    )
     if result.get("status") == "authorized":
         receipt = result.get("receipt") or {}
         _record_evidence(
             {
                 "message_type": "AuthorizationReceipt",
+                "message_id": message_id,
+                "correlation_id": correlation_id,
                 "capability_id": cap.get("id", ""),
                 "action": receipt.get("action", ""),
                 "outcome": receipt.get("outcome", ""),
