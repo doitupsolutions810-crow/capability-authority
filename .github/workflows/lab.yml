@@ -27,21 +27,14 @@ jobs:
           python-version: "3.12"
       - name: Install lab deps
         run: python -m pip install --upgrade pip && pip install -r requirements-lab.txt
-      - name: Lab tests
+      - name: Lab regression tests
         run: |
           python tests/test_plane.py
           python tests/test_evidence_receipt_spiffe.py
           python tests/test_agents.py
+          python -m pytest -q tests/test_policy_allowlist.py tests/test_evidence_fail_closed.py
       - name: Hands + agent demos
         run: |
           python scripts/demo_hands.py
           python scripts/demo_agents.py
           python scripts/demo_production_profile.py || true
-
-  slim-probe:
-    runs-on: ubuntu-slim
-    steps:
-      - name: Report hosted slim pool
-        run: |
-          echo "runner=${RUNNER_NAME:-none} os=${RUNNER_OS:-none} arch=${RUNNER_ARCH:-none}"
-          uname -a

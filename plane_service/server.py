@@ -49,17 +49,36 @@ except Exception as e:
     print(f"[preflight] skip: {e}")
 
 
-def _record_evidence(event: dict) -> None:
+class EvidencePersistenceError(RuntimeError):
+    pass
+
+
+def _record_evidence(event: dict) -> dict:
+    """Publish through AttestPipe and confirm its durable index subscriber stored it.
+
+    Evidence is a prerequisite for returning a successful capability/receipt.
+    Missing subscribers, publish failures, or failed read-after-write checks
+    therefore fail closed rather than logging and continuing.
+    """
+    if not isinstance(event, dict) or not isinstance(event.get("message_type"), str):
+        raise EvidencePersistenceError("evidence event requires message_type")
     try:
         from evidence.index import get_index
-        get_index().ingest(event)
-    except Exception as e:
-        print(f"[evidence] ingest skipped: {e}")
-    try:
         from attestpipe.bus import BUS
         BUS.publish(event)
-    except Exception as e:
-        print(f"[attestpipe] publish skipped: {e}")
+        index = get_index()
+        rows = index.query(
+            capability_id=event.get("capability_id"),
+            message_type=event["message_type"],
+            limit=1,
+        )
+        if not rows:
+            raise EvidencePersistenceError("evidence was not confirmed in the durable index")
+        return {"durable": True, "replication": "published"}
+    except EvidencePersistenceError:
+        raise
+    except Exception as exc:
+        raise EvidencePersistenceError(f"evidence persistence failed: {exc}") from exc
 
 
 def _bus_publish(msg) -> None:
