@@ -27,6 +27,14 @@ from plane_service.executor import Executor
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
 from plane_service.delegation import DelegationError, verify_requester_assertion, validate_delegation
+from plane_service.issuance_idempotency import (
+    IssuanceIdempotencyConflict,
+    IssuanceIdempotencyCorrupt,
+    IssuanceIdempotencyExpired,
+    IssuanceIdempotencyReplay,
+    IssuedAssertion,
+    get_issuance_store,
+)
 from plane_service.spiffe_identity import fetch_workload_identity
 
 TRUST_DOMAIN = os.environ.get("PLANE_TRUST_DOMAIN", "prod")
@@ -155,6 +163,112 @@ def handle_issue(body: dict) -> dict:
     }
 
 
+def _delegated_event_id(assertion_jti: str) -> str:
+    return "delegation:" + hashlib.sha256(assertion_jti.encode("ascii")).hexdigest()
+
+
+def _expired_delegation(record_id: str, message_id: str, correlation_id: str) -> dict:
+    return {
+        "status": "error",
+        "error": "delegated_capability_expired",
+        "message_id": message_id,
+        "correlation_id": correlation_id,
+        "capability_id": record_id,
+        "idempotent_replay": True,
+    }
+
+
+def _delegation_evidence_event(record: IssuedAssertion, *, requester: str, audience: str) -> dict:
+    child = record.capability
+    return {
+        "event_id": _delegated_event_id(record.assertion_jti),
+        "message_type": "CapabilityDelegated",
+        "message_id": record.assertion_jti,
+        "correlation_id": record.correlation_id,
+        "request_digest": record.fingerprint,
+        "requester": requester,
+        "audience": audience,
+        "parent_capability_id": child.get("parent_id"),
+        "capability_id": child.get("id"),
+        "capability": child,
+        "signature": record.signature,
+        "delegation_depth": child.get("delegation_depth"),
+        "expires_at": child.get("expires_at"),
+    }
+
+
+def _evidence_matches_issuance(row: dict, record: IssuedAssertion) -> bool:
+    capability = row.get("capability")
+    signature = row.get("signature")
+    if row.get("request_digest") != record.fingerprint:
+        return False
+    if not isinstance(capability, dict) or not isinstance(signature, str):
+        return False
+    if signature != record.signature:
+        return False
+    try:
+        return canonical(capability) == record.capability_canonical
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return False
+
+
+def _ok_delegation(record: IssuedAssertion, *, created: bool) -> dict:
+    return {
+        "status": "ok",
+        "message_id": record.assertion_jti,
+        "correlation_id": record.correlation_id,
+        "capability": record.capability,
+        "signature": record.signature,
+        "idempotent_replay": not created,
+    }
+
+
+def _publish_delegated(record: IssuedAssertion, *, created: bool, requester: str, audience: str) -> dict:
+    """Return the stored assertion only after durable evidence agrees with it."""
+    from evidence.index import get_index
+
+    index = get_index()
+    event = _delegation_evidence_event(record, requester=requester, audience=audience)
+    prior = index.query(message_type="CapabilityDelegated", correlation_id=record.correlation_id, limit=1)
+    if prior:
+        if not _evidence_matches_issuance(prior[0], record):
+            return {"status": "error", "error": "issuance_idempotency_corrupt"}
+        return _ok_delegation(record, created=False)
+    try:
+        _record_evidence(event)
+    except Exception:
+        prior = index.query(message_type="CapabilityDelegated", correlation_id=record.correlation_id, limit=1)
+        if prior:
+            if not _evidence_matches_issuance(prior[0], record):
+                return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+            return _ok_delegation(record, created=False)
+        reused = index.query(message_type="CapabilityDelegated", message_id=record.assertion_jti, limit=1)
+        if reused:
+            return {"status": "error", "error": "requester assertion replay detected"}
+        raise
+    return _ok_delegation(record, created=created)
+
+
+def _mint_delegated_child(audience, rights, constraints, ttl, parent, parent_depth):
+    child = issue(
+        caller=audience,
+        issuer=ISSUER,
+        rights=rights,
+        constraints=constraints,
+        ttl_seconds=ttl,
+        trust_domain=TRUST_DOMAIN,
+        broker_measurement=BROKER_MEASUREMENT,
+        policy_version=POLICY_VERSION,
+    )
+    child["parent_id"] = parent["id"]
+    child["delegation_depth"] = parent_depth + 1
+    encoded = canonical(child)
+    stable = json.loads(encoded)
+    if not isinstance(stable, dict) or canonical(stable) != encoded:
+        raise RuntimeError("delegated capability canonical form is unstable")
+    return stable, sign(stable)
+
+
 def handle_delegate(body: dict) -> dict:
     """Issue an attenuated child capability to an allowlisted workload audience."""
     if not isinstance(body, dict):
@@ -221,6 +335,18 @@ def handle_delegate(body: dict) -> dict:
         return {"status": "error", "error": "delegation request is not canonical finite JSON"}
     from evidence.index import get_index
     index = get_index()
+    try:
+        existing = get_issuance_store().lookup(correlation_id)
+    except IssuanceIdempotencyCorrupt:
+        return {"status": "error", "error": "issuance_idempotency_corrupt"}
+    if existing is not None:
+        if existing.fingerprint != request_digest:
+            return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+        if existing.expires_at <= time.time():
+            return _expired_delegation(str(existing.capability.get("id")), existing.assertion_jti, correlation_id)
+        return _publish_delegated(existing, created=False, requester=requester, audience=audience)
+    # Evidence remains the audit log and the replay source for entries written
+    # before the idempotency ledger existed. It is not a second issuer.
     prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
     if prior:
         row = prior[0]
@@ -233,12 +359,11 @@ def handle_delegate(body: dict) -> dict:
         if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
             return {"status": "error", "error": "prior delegated capability expiry is invalid"}
         if prior_expiry <= time.time():
-            return {
-                "status": "error", "error": "delegated_capability_expired",
-                "message_id": row.get("message_id"), "correlation_id": correlation_id,
-                "capability_id": prior_child.get("id"), "idempotent_replay": True,
-            }
-        return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
+            return _expired_delegation(str(prior_child.get("id")), str(row.get("message_id")), correlation_id)
+        return {
+            "status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id,
+            "capability": prior_child, "signature": row["signature"], "idempotent_replay": True,
+        }
     # No prior result exists. An expired assertion must never authorize a
     # first issuance, even when its signature and identity remain authentic.
     try:
@@ -262,54 +387,23 @@ def handle_delegate(body: dict) -> dict:
     reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
     if reused:
         return {"status": "error", "error": "requester assertion replay detected"}
-    child = issue(caller=audience, issuer=ISSUER, rights=rights, constraints=constraints, ttl_seconds=ttl, trust_domain=TRUST_DOMAIN, broker_measurement=BROKER_MEASUREMENT, policy_version=POLICY_VERSION)
-    child["parent_id"] = parent["id"]
-    child["delegation_depth"] = parent_depth + 1
-    child_signature = sign(child)
-    # The requester assertion JTI is the globally unique issuance identity.
-    # Using only correlation_id here would allow the same signed assertion to
-    # race under two correlations and mint two children before either query sees
-    # the other's evidence. The warehouse's unique event_id index fences that.
-    event_id = "delegation:" + hashlib.sha256(jti.encode("ascii")).hexdigest()
-    event = {
-        "event_id": event_id,
-        "message_type": "CapabilityDelegated", "message_id": jti, "correlation_id": correlation_id,
-        "request_digest": request_digest, "requester": requester, "audience": audience,
-        "parent_capability_id": parent["id"], "capability_id": child["id"],
-        "capability": child, "signature": child_signature,
-        "delegation_depth": child["delegation_depth"], "expires_at": child["expires_at"],
-    }
     try:
-        _record_evidence(event)
-    except Exception:
-        # Resolve a concurrent writer only from durable evidence. A matching
-        # correlation returns the exact winning child; a reused JTI under a
-        # different correlation is rejected. Storage failures with no committed
-        # evidence still propagate and never return an unrecorded capability.
-        prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
-        if prior:
-            row = prior[0]
-            if row.get("request_digest") != request_digest:
-                return {"status": "error", "error": "delegation_correlation_replay_conflict"}
-            if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
-                return {"status": "error", "error": "prior delegation evidence is incomplete"}
-            prior_child = row["capability"]
-            prior_expiry = prior_child.get("expires_at")
-            if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
-                return {"status": "error", "error": "prior delegated capability expiry is invalid"}
-            if prior_expiry <= time.time():
-                return {
-                    "status": "error", "error": "delegated_capability_expired",
-                    "message_id": row.get("message_id"), "correlation_id": correlation_id,
-                    "capability_id": prior_child.get("id"), "idempotent_replay": True,
-                }
-            return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id,
-                    "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
-        reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
-        if reused:
-            return {"status": "error", "error": "requester assertion replay detected"}
-        raise
-    return {"status": "ok", "message_id": jti, "correlation_id": correlation_id, "capability": child, "signature": child_signature, "idempotent_replay": False}
+        record, created = get_issuance_store().commit_or_replay(
+            correlation_id=correlation_id,
+            fingerprint=request_digest,
+            assertion_jti=jti,
+            now=time.time(),
+            mint=lambda: _mint_delegated_child(audience, rights, constraints, ttl, parent, parent_depth),
+        )
+    except IssuanceIdempotencyConflict:
+        return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+    except IssuanceIdempotencyExpired as exc:
+        return _expired_delegation(str(exc.record.capability.get("id")), exc.record.assertion_jti, correlation_id)
+    except IssuanceIdempotencyReplay:
+        return {"status": "error", "error": "requester assertion replay detected"}
+    except IssuanceIdempotencyCorrupt:
+        return {"status": "error", "error": "issuance_idempotency_corrupt"}
+    return _publish_delegated(record, created=created, requester=requester, audience=str(audience))
 
 
 def handle_attenuate(body: dict) -> dict:
@@ -354,9 +448,6 @@ def handle_execute(body: dict) -> dict:
         return {"status": "error", "error": "invalid signature"}
     if check_bounds(cap, acceptance):
         return {"status": "error", "error": "capability bounds rejected"}
-    if not verify(cap, required, caller):
-        return {"status": "error", "error": "verify failed"}
-
 
     from evidence.index import get_index
     index = get_index()
@@ -366,12 +457,21 @@ def handle_execute(body: dict) -> dict:
         limit=1,
     )
     action = f"{required.get('type')}:{required.get('resource')}:{required.get('method')}"
-    payload_bytes = canonical({"required": required, "input": action_input})
+    try:
+        payload_bytes = canonical({"required": required, "input": action_input})
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return {"status": "error", "error": "execution request is not canonical finite JSON"}
     payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
     if prior:
         prior_receipt = prior[0].get("receipt") or {}
         if (prior_receipt.get("action") != action or prior_receipt.get("capability_id") != cap.get("id") or prior_receipt.get("payload_digest") != payload_digest):
             return {"status": "error", "error": "correlation_id_replay_conflict"}
+    # A different method on an existing correlation is a replay conflict, not a
+    # fresh authorization miss. Matching replays still require a valid capability.
+    if not verify(cap, required, caller):
+        return {"status": "error", "error": "verify failed"}
+    if prior:
+        prior_receipt = prior[0].get("receipt") or {}
         executed = prior_receipt.get("outcome") == "succeeded"
         return {
             "status": "executed" if executed else "authorized",

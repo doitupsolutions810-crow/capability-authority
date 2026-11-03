@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from plane_service import server
 from plane_service import delegation
 from plane_service.crypto_sign import canonical
+from plane_service.issuance_idempotency import reset_issuance_store_for_tests
 
 REQUESTER = "spiffe://prod/agent/avrone"
 SWARM = "spiffe://prod/agent/swarm"
@@ -24,11 +25,15 @@ class MemoryIndex:
         self.lock = threading.Lock()
 
     def query(self, **filters):
+        limit = filters.pop("limit", None)
         with self.lock:
-            return [
+            matched = [
                 dict(row) for row in self.rows
                 if all(row.get(key) == value for key, value in filters.items() if value is not None)
             ]
+        if isinstance(limit, int) and limit >= 0:
+            return matched[:limit]
+        return matched
 
     def append_event(self, event):
         with self.lock:
@@ -52,6 +57,8 @@ def delegation_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PLANE_DELEGATION_REQUESTER_ID", REQUESTER)
     monkeypatch.setenv("PLANE_DELEGATION_REQUESTER_PUBLIC_KEY_FILE", str(public_file))
     monkeypatch.setenv("PLANE_DELEGATION_ALLOWED_AUDIENCES", SWARM)
+    monkeypatch.setenv("PLANE_ISSUANCE_IDEMPOTENCY_PATH", str(tmp_path / "issuance.sqlite"))
+    reset_issuance_store_for_tests()
     index = MemoryIndex()
     import evidence.index as evidence_index
     monkeypatch.setattr(evidence_index, "get_index", lambda: index)
@@ -251,7 +258,7 @@ def test_same_correlation_reconciles_after_requester_assertion_expiry(delegation
     class ExpiredDateTime(real_datetime):
         @classmethod
         def now(cls, tz=None):
-            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+            return cls.fromtimestamp(original_now + 35, tz=tz or timezone.utc)
     monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     second = server.handle_delegate(request)
@@ -270,7 +277,7 @@ def test_expired_assertion_cannot_create_a_new_correlation(delegation_env, monke
     class ExpiredDateTime(real_datetime):
         @classmethod
         def now(cls, tz=None):
-            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+            return cls.fromtimestamp(original_now + 35, tz=tz or timezone.utc)
     monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     result = server.handle_delegate(request)
@@ -289,7 +296,7 @@ def test_expired_assertion_cannot_replay_same_correlation_with_changed_request(d
     class ExpiredDateTime(real_datetime):
         @classmethod
         def now(cls, tz=None):
-            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+            return cls.fromtimestamp(original_now + 35, tz=tz or timezone.utc)
     monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     conflict = server.handle_delegate({**request, "ttl_seconds": 60})
@@ -308,7 +315,7 @@ def test_expired_assertion_with_tampered_signature_cannot_retrieve_prior_result(
     class ExpiredDateTime(real_datetime):
         @classmethod
         def now(cls, tz=None):
-            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+            return cls.fromtimestamp(original_now + 35, tz=tz or timezone.utc)
     monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     tampered = {**request, "requester_assertion": dict(request["requester_assertion"])}
