@@ -60,9 +60,11 @@ def _is_spiffe_id(value: Any) -> bool:
     except ValueError:
         return False
     trust_domain = parsed.netloc
+    dns_label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    dns_name = r"(?=^.{1,253}$)" + dns_label + r"(?:\." + dns_label + r")*"
     return (
         parsed.scheme == "spiffe"
-        and bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", trust_domain))
+        and bool(re.fullmatch(dns_name, trust_domain))
         and ":" not in trust_domain
         and parsed.path.startswith("/")
         and len(parsed.path) > 1
