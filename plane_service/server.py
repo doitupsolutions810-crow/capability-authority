@@ -185,7 +185,7 @@ def handle_delegate(body: dict) -> dict:
     if not allowed_audiences:
         return {"status": "error", "error": "delegation audience allowlist is not configured"}
     try:
-        ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=__import__("time").time())
+        ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=time.time(), max_delegation_depth=int(acceptance.get("max_delegation_depth") or 3))
         parent_depth = parent.get("delegation_depth", 0)
         constraints = parent.get("constraints")
         if not isinstance(constraints, dict):
