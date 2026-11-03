@@ -16,6 +16,7 @@ DEFAULT_ALLOWED_RIGHTS = frozenset({
     ("read", "demo", "GET"),
     ("Execute", "tool.echo", "POST"),
     ("Execute", "artifact.write_demo", "POST"),
+    ("Execute", "swarm.jobs", "POST"),
     ("Execute", "tool.summarize", "POST"),
     ("Execute", "task.run_tests", "POST"),
     ("Execute", "task.build_artifact", "POST"),
