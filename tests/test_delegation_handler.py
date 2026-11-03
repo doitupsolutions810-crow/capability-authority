@@ -135,7 +135,7 @@ def test_concurrent_same_correlation_returns_one_durable_child(delegation_env):
     assert len(index.rows) == 1
 
 
-def test_concurrent_same_correlation_with_distinct_assertion_jtis_commits_one_child(delegation_env):
+def test_concurrent_same_correlation_with_distinct_assertion_jtis_rejects_conflict(delegation_env):
     requester_key, index = delegation_env
     first_request = make_request(requester_key)
     second_request = {**first_request, "requester_assertion": dict(first_request["requester_assertion"])}
@@ -175,10 +175,9 @@ def test_concurrent_same_correlation_with_distinct_assertion_jtis_commits_one_ch
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(server.handle_delegate, [first_request, second_request]))
 
-    assert all(result["status"] == "ok" for result in results)
-    assert results[0]["capability"] == results[1]["capability"]
-    assert sum(result.get("idempotent_replay") is False for result in results) == 1
-    assert sum(result.get("idempotent_replay") is True for result in results) == 1
+    assert sum(result["status"] == "ok" for result in results) == 1
+    rejected = next(result for result in results if result["status"] == "error")
+    assert rejected["error"] == "delegation_correlation_replay_conflict"
     assert len(index.rows) == 1
 
 
@@ -282,16 +281,16 @@ def test_delegation_evidence_has_stable_assertion_event_id(delegation_env):
     assert index.rows[0]["event_id"] == expected
 
 
-def test_same_correlation_with_fresh_assertion_jti_returns_original_child(delegation_env, monkeypatch):
+def test_same_correlation_with_fresh_assertion_jti_is_rejected(delegation_env, monkeypatch):
     requester_key, index = delegation_env
     request = make_request(requester_key)
     jtis = iter(["jti-first", "jti-first", "jti-retry"])
     monkeypatch.setattr(server, "verify_requester_assertion", lambda *a, **k: next(jtis))
     first = server.handle_delegate(request)
     second = server.handle_delegate(request)
-    assert first["status"] == second["status"] == "ok"
-    assert second["idempotent_replay"] is True
-    assert second["capability"] == first["capability"]
+    assert first["status"] == "ok"
+    assert second["status"] == "error"
+    assert second["error"] == "delegation_correlation_replay_conflict"
     assert len(index.rows) == 1
 
 
