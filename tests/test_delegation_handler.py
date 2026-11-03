@@ -72,14 +72,16 @@ def make_request(requester_key, parent=None, **overrides):
 
 def test_delegate_issues_attenuated_child_and_persists_before_return(delegation_env):
     requester_key, index = delegation_env
-    result = server.handle_delegate(make_request(requester_key))
+    request = make_request(requester_key)
+    parent_expiry = request["parent_capability"]["expires_at"]
+    result = server.handle_delegate(request)
     assert result["status"] == "ok"
     child = result["capability"]
     assert child["audience"] == SWARM
     assert child["parent_id"] == "parent-001"
     assert child["rights"] == [RIGHT]
     assert child["constraints"] == {"tenant": "test-tenant"}
-    assert child["expires_at"] <= index.rows[0]["expires_at"]
+    assert child["expires_at"] <= parent_expiry
     assert result["signature"] == "child-signature"
     assert len(index.rows) == 1
     assert index.rows[0]["message_type"] == "CapabilityDelegated"
