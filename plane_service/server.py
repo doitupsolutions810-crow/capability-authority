@@ -10,6 +10,7 @@ import sys
 import time
 import stat
 import math
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -250,7 +251,9 @@ def handle_delegate(body: dict) -> dict:
     child["parent_id"] = parent["id"]
     child["delegation_depth"] = parent_depth + 1
     child_signature = sign(child)
+    event_id = "delegation:" + hashlib.sha256(correlation_id.encode("ascii")).hexdigest()
     _record_evidence({
+        "event_id": event_id,
         "message_type": "CapabilityDelegated", "message_id": jti, "correlation_id": correlation_id,
         "request_digest": request_digest, "requester": requester, "audience": audience,
         "parent_capability_id": parent["id"], "capability_id": child["id"],
