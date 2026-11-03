@@ -243,7 +243,7 @@ def test_malformed_parent_rights_never_crash_or_grant(bad_parent_right):
 
 
 @pytest.mark.parametrize("bad_now", [float("nan"), float("inf"), -float("inf"), True, "1"])
-def test_rejects_invalid_parent_clock_values(bad_now):
+def test_rejects_invalid_max_ttl_configuration(bad_now):
     now = datetime.now(timezone.utc).timestamp()
     with pytest.raises(DelegationError):
         validate_delegation(
