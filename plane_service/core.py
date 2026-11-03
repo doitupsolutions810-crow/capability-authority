@@ -1,12 +1,31 @@
 """Pure capability core — issue / attenuate / verify. Amplification forbidden."""
 from __future__ import annotations
-import time, uuid
-from typing import Any, Optional
+
+import math
+import time
+import uuid
+
 
 def now() -> float:
     return time.time()
 
+
+def _validate_rights(rights):
+    if not isinstance(rights, list) or not rights:
+        raise ValueError("rights must be a non-empty list")
+    for right in rights:
+        if not isinstance(right, dict):
+            raise ValueError("each right must be an object")
+        for field in ("type", "resource", "method"):
+            value = right.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"right.{field} is required; wildcard methods are not supported")
+
+
 def issue(caller, issuer, rights, constraints, ttl_seconds, trust_domain, broker_measurement, policy_version):
+    if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+        raise ValueError("ttl_seconds must be a positive integer")
+    _validate_rights(rights)
     issued_at = now()
     return {
         "id": str(uuid.uuid4()),
@@ -24,10 +43,13 @@ def issue(caller, issuer, rights, constraints, ttl_seconds, trust_domain, broker
         "delegation_depth": 0,
     }
 
+
 def attenuate(cap, new_rights):
+    _validate_rights(new_rights)
     old = {(r.get("type"), r.get("resource"), r.get("method")) for r in cap.get("rights") or []}
-    for r in new_rights:
-        if (r.get("type"), r.get("resource"), r.get("method")) not in old:
+    for right in new_rights:
+        key = (right.get("type"), right.get("resource"), right.get("method"))
+        if key not in old:
             raise ValueError("amplification forbidden")
     out = dict(cap)
     out["id"] = str(uuid.uuid4())
@@ -38,13 +60,26 @@ def attenuate(cap, new_rights):
     out["delegation_depth"] = int(cap.get("delegation_depth") or 0) + 1
     return out
 
+
 def verify(cap, required, caller, now_ts=None):
-    ts = now_ts if now_ts is not None else now()
-    if ts > float(cap.get("expires_at") or 0):
+    """Verify audience, expiry, and the complete right tuple including method."""
+    try:
+        ts = now_ts if now_ts is not None else now()
+        expires_at = float(cap.get("expires_at"))
+        if not math.isfinite(ts) or not math.isfinite(expires_at) or ts >= expires_at:
+            return False
+        if cap.get("audience") not in (caller, "*"):
+            return False
+        required_type = required.get("type")
+        required_resource = required.get("resource")
+        required_method = required.get("method")
+        if not all(isinstance(v, str) and v.strip() for v in (required_type, required_resource, required_method)):
+            return False
+        for right in cap.get("rights") or []:
+            if (right.get("type"), right.get("resource"), right.get("method")) == (
+                required_type, required_resource, required_method
+            ):
+                return True
         return False
-    if cap.get("audience") not in (caller, "*"):
+    except (TypeError, ValueError, AttributeError):
         return False
-    for r in cap.get("rights") or []:
-        if r.get("type") == required.get("type") and r.get("resource") == required.get("resource"):
-            return True
-    return False
