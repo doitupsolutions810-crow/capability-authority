@@ -146,3 +146,10 @@ def test_rejects_future_parent_issue_time_and_excessive_delegation_depth():
         validate_delegation(parent_for(now, issued_at=now + 120), requester=REQUESTER, audience=SWARM, rights=[RIGHT], ttl_seconds=30, allowed_audiences={SWARM}, now_ts=now)
     with pytest.raises(DelegationError, match="depth"):
         validate_delegation(parent_for(now, delegation_depth=3), requester=REQUESTER, audience=SWARM, rights=[RIGHT], ttl_seconds=30, allowed_audiences={SWARM}, now_ts=now)
+
+
+def test_rejects_audience_not_scoped_by_parent_even_if_globally_allowlisted():
+    now = datetime.now(timezone.utc).timestamp()
+    parent = parent_for(now, constraints={"tenant": "test-tenant", "delegation_audiences": []})
+    with pytest.raises(DelegationError, match="parent constraints"):
+        validate_delegation(parent, requester=REQUESTER, audience=SWARM, rights=[RIGHT], ttl_seconds=30, allowed_audiences={SWARM}, now_ts=now)
