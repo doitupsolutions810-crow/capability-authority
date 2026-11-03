@@ -58,7 +58,7 @@ def make_request(requester_key, parent=None, **overrides):
     assertion = {**unsigned, "signature": base64.b64encode(requester_key.sign(canonical(unsigned))).decode("ascii")}
     parent = parent or {
         "id": "parent-001", "issuer": server.ISSUER, "audience": REQUESTER,
-        "rights": [RIGHT], "constraints": {"tenant": "test-tenant"},
+        "rights": [RIGHT], "constraints": {"tenant": "test-tenant", "delegation_audiences": [SWARM]},
         "issued_at": now.timestamp() - 10, "expires_at": now.timestamp() + 90,
         "trust_domain": "prod", "policy_version": 1, "delegation_depth": 0,
     }
