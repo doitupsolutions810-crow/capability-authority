@@ -10,7 +10,7 @@ The new `POST /v1/capabilities/delegate` route issues an attenuated child capabi
 4. The parent capability must have a valid Authority signature, issuer, bounds, and an audience exactly equal to the authenticated requester.
 5. The requested child audience must be in both `PLANE_DELEGATION_ALLOWED_AUDIENCES` and the parent capability's signed `constraints.delegation_audiences` list. Child rights must be an exact subset of parent `(type, resource, method)` tuples. No wildcard or method substitution is accepted.
 6. Child TTL is capped by the parent's remaining lifetime, the Authority's maximum TTL, and the configured maximum delegation depth. Parent constraints are inherited unchanged.
-7. The child capability and signed response are written to the durable evidence index before the endpoint returns success. Idempotency binds both the stable correlation ID and the exact requester assertion `jti`: a retry must reuse the same signed assertion and request digest. A fresh `jti` under an already-used correlation is a conflict, and reusing one `jti` under a different correlation is rejected. A different `jti` must never receive a prior child without being recorded as that issuance identity.
+7. The child capability and signed response are written to the durable evidence index before the endpoint returns success. Idempotency binds the stable correlation ID to both the assertion `jti` and the digest of the full canonical signed requester assertion. A retry must reuse the exact signed assertion and request parameters. A fresh `jti` or altered signed assertion under an already-used correlation is a conflict; reusing one `jti` under a different correlation is rejected.
 
 ## Bootstrap parent capability
 
