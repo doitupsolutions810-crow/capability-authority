@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from plane_service import server
+from plane_service import delegation
 from plane_service.crypto_sign import canonical
 
 REQUESTER = "spiffe://prod/agent/avrone"
@@ -189,7 +190,7 @@ def test_delegation_evidence_has_stable_correlation_event_id(delegation_env):
 def test_same_correlation_with_fresh_assertion_jti_returns_original_child(delegation_env, monkeypatch):
     requester_key, index = delegation_env
     request = make_request(requester_key)
-    jtis = iter(["jti-first", "jti-retry"])
+    jtis = iter(["jti-first", "jti-first", "jti-retry"])
     monkeypatch.setattr(server, "verify_requester_assertion", lambda *a, **k: next(jtis))
     first = server.handle_delegate(request)
     second = server.handle_delegate(request)
@@ -205,7 +206,14 @@ def test_same_correlation_reconciles_after_requester_assertion_expiry(delegation
     original_now = server.time.time()
     first = server.handle_delegate(request)
     assert first["status"] == "ok"
-    # The assertion expires after 20 seconds; the delegated child remains valid.
+    # Freeze both clocks: the assertion expires after 20 seconds while the
+    # delegated child remains valid for the parent's remaining lifetime.
+    real_datetime = delegation.datetime
+    class ExpiredDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+    monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     second = server.handle_delegate(request)
     assert second["status"] == "ok"
@@ -219,6 +227,12 @@ def test_expired_assertion_cannot_create_a_new_correlation(delegation_env, monke
     requester_key, index = delegation_env
     request = make_request(requester_key)
     original_now = server.time.time()
+    real_datetime = delegation.datetime
+    class ExpiredDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+    monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     result = server.handle_delegate(request)
     assert result["status"] == "error"
@@ -232,6 +246,12 @@ def test_expired_assertion_cannot_replay_same_correlation_with_changed_request(d
     original_now = server.time.time()
     first = server.handle_delegate(request)
     assert first["status"] == "ok"
+    real_datetime = delegation.datetime
+    class ExpiredDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+    monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
     monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
     conflict = server.handle_delegate({**request, "ttl_seconds": 60})
     assert conflict["status"] == "error"
