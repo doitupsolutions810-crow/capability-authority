@@ -140,9 +140,10 @@ def test_same_correlation_reconciles_after_parent_expiry(delegation_env, monkeyp
     expiry = request["parent_capability"]["expires_at"]
     monkeypatch.setattr(server.time, "time", lambda: expiry + 1)
     second = server.handle_delegate(request)
-    assert second["status"] == "ok"
+    assert second["status"] == "error"
+    assert second["error"] == "delegated_capability_expired"
     assert second["idempotent_replay"] is True
-    assert second["capability"] == first["capability"]
+    assert second["capability_id"] == first["capability"]["id"]
     assert len(index.rows) == 1
 
 
