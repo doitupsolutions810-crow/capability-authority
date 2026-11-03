@@ -7,6 +7,7 @@ import json
 import uuid
 import os
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -185,9 +186,7 @@ def handle_delegate(body: dict) -> dict:
         return {"status": "error", "error": "delegation audience allowlist is not configured"}
     try:
         ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=__import__("time").time())
-        parent_depth = int(parent.get("delegation_depth") or 0)
-        if parent_depth + 1 > int(acceptance.get("max_delegation_depth") or 3):
-            raise DelegationError("maximum delegation depth exceeded")
+        parent_depth = parent.get("delegation_depth", 0)
         constraints = parent.get("constraints")
         if not isinstance(constraints, dict):
             raise DelegationError("parent constraints must be an object")
