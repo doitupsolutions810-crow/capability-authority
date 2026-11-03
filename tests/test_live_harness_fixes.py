@@ -18,6 +18,7 @@ from evidence.warehouse import EvidenceWarehouse
 from plane_service.core import issue
 from plane_service.crypto_sign import sign
 from plane_service.executor import Executor
+from plane_service.issuance_idempotency import reset_issuance_store_for_tests
 from plane_service.server import DEFAULT_PORT, Handler, handle_issue, make_server
 
 RIGHT = {"type": "read", "resource": "demo", "method": "GET"}
@@ -30,6 +31,18 @@ class _RecordingBus:
 
     def publish(self, event):
         return self.index.ingest(event)
+
+
+@pytest.fixture(autouse=True)
+def pin_lab_identity(monkeypatch):
+    """Keep issuance tests on the dev workload identity regardless of earlier tests."""
+    monkeypatch.setenv("PRODUCTION", "0")
+    monkeypatch.setenv("PLANE_PRODUCTION", "0")
+    monkeypatch.delenv("SPIFFE_REQUIRED", raising=False)
+    monkeypatch.delenv("SPIFFE_ENDPOINT_SOCKET", raising=False)
+    monkeypatch.delenv("PLANE_SPIFFE_ID", raising=False)
+    monkeypatch.delenv("SPIFFE_ID", raising=False)
+    monkeypatch.delenv("PLANE_ALLOW_CALLER_OVERRIDE", raising=False)
 
 
 @pytest.fixture
@@ -78,32 +91,40 @@ def test_issue_rejects_caller_mismatch_instead_of_rebinding():
     assert omitted["capability"]["audience"] == CALLER
 
 
-def test_execute_is_idempotent_per_capability_and_action():
+def test_execute_replay_is_keyed_by_correlation_capability_and_action():
     cap, signature = _issued_capability()
     executor = Executor()
-    first = executor.execute(cap, signature, RIGHT, CALLER, correlation_id="first-correlation")
-    second = executor.execute(cap, signature, RIGHT, CALLER, correlation_id="second-correlation")
+    first = executor.execute(cap, signature, RIGHT, CALLER, correlation_id="corr-execute-1")
+    replay = executor.execute(cap, signature, RIGHT, CALLER, correlation_id="corr-execute-1")
     assert first["status"] == "authorized"
+    assert first["execution_status"] == "NOT_IMPLEMENTED"
     assert first["idempotent_replay"] is False
-    assert second["idempotent_replay"] is True
-    assert second["receipt"] == first["receipt"]
-    assert second["receipt"]["message_id"] == first["receipt"]["message_id"]
-    assert second["receipt"]["signature"] == first["receipt"]["signature"]
-
-    conflict = executor.execute(
-        cap, signature, RIGHT, CALLER, action_input={"changed": True},
-    )
-    assert conflict["status"] == "error"
-    assert conflict["error"] == "capability_action_replay_conflict"
-    replay = executor.execute(cap, signature, RIGHT, CALLER, correlation_id="third-correlation")
+    assert replay["idempotent_replay"] is True
     assert replay["receipt"] == first["receipt"]
 
+    other = executor.execute(cap, signature, RIGHT, CALLER, correlation_id="corr-execute-2")
+    assert other["status"] == "error"
+    assert other["error"] == "rate limited"
+    assert other.get("idempotent_replay") is not True
+
+    conflict = executor.execute(
+        cap, signature, RIGHT, CALLER,
+        correlation_id="corr-execute-1", action_input={"changed": True},
+    )
+    assert conflict["status"] == "error"
+    assert conflict["error"] == "execution_replay_conflict"
+
+    fresh_cap, fresh_sig = _issued_capability()
+    fresh = Executor()
+
     def once(_slot):
-        return executor.execute(cap, signature, RIGHT, CALLER)
+        return fresh.execute(fresh_cap, fresh_sig, RIGHT, CALLER, correlation_id="corr-execute-race")
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(once, range(8)))
-    assert all(result["receipt"] == first["receipt"] for result in results)
+    assert all(result["status"] == "authorized" for result in results)
+    assert sum(result.get("idempotent_replay") is False for result in results) == 1
+    assert all(result["receipt"] == results[0]["receipt"] for result in results)
 
 
 def test_malformed_and_non_object_json_return_4xx(authority_http):
@@ -183,12 +204,67 @@ def test_concurrent_issue_requests_do_not_drop_connections(authority_http):
     assert all(result.status_code == 200 and result.json()["status"] == "ok" for result in results)
 
 
+def test_issue_is_idempotent_by_correlation_id(monkeypatch, tmp_path):
+    index = EvidenceIndex(tmp_path / "index.json")
+    warehouse = EvidenceWarehouse(tmp_path / "evidence.db")
+    monkeypatch.setattr(idxmod, "get_index", lambda: index)
+    monkeypatch.setattr(whmod, "get_warehouse", lambda: warehouse)
+    monkeypatch.setattr(busmod, "BUS", _RecordingBus(index))
+    monkeypatch.setenv("PLANE_ISSUANCE_IDEMPOTENCY_PATH", str(tmp_path / "issuance.sqlite"))
+    reset_issuance_store_for_tests()
+    body = {"correlation_id": "issue-corr-1", "rights": [RIGHT], "ttl_seconds": 60}
+    first = handle_issue(body)
+    second = handle_issue(dict(body))
+    assert first["status"] == "ok"
+    assert second["status"] == "ok"
+    assert second["idempotent_replay"] is True
+    assert second["capability"] == first["capability"]
+    assert second["signature"] == first["signature"]
+    assert second["capability"]["id"] == first["capability"]["id"]
+
+    changed = handle_issue({**body, "ttl_seconds": 30})
+    assert changed["status"] == "error"
+    assert changed["error"] == "issue_correlation_replay_conflict"
+    assert "capability" not in changed
+
+    def once(_slot):
+        return handle_issue({
+            "correlation_id": "issue-corr-race",
+            "rights": [RIGHT],
+            "ttl_seconds": 60,
+        })
+
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        results = list(pool.map(once, range(64)))
+    assert all(result["status"] == "ok" for result in results)
+    assert len({result["capability"]["id"] for result in results}) == 1
+    assert len({result["signature"] for result in results}) == 1
+    assert sum(result.get("idempotent_replay") is False for result in results) == 1
+
+
+def test_methodless_rights_are_rejected():
+    denied = handle_issue({
+        "rights": [{"type": "read", "resource": "demo"}],
+        "ttl_seconds": 60,
+    })
+    assert denied["status"] == "error"
+    assert "method" in denied["error"]
+    assert "capability" not in denied
+
+
 def test_cryptography_is_declared_in_requirements():
     root = Path(__file__).resolve().parents[1]
     for name in ("requirements.txt", "requirements-lab.txt", "requirements-spiffe.txt"):
         text = (root / name).read_text(encoding="utf-8")
         assert any(line.split(">=", 1)[0].strip() == "cryptography" or line.startswith("cryptography")
                    for line in text.splitlines() if line.strip() and not line.strip().startswith("#"))
+
+
+def test_rfc8785_is_declared_in_requirements():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("requirements.txt", "requirements-lab.txt", "requirements-spiffe.txt"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert any(line.startswith("rfc8785") for line in text.splitlines())
 
 
 def test_default_listen_port_does_not_clash_with_cyclekernal():

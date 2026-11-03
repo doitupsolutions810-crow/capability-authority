@@ -115,6 +115,71 @@ def _bus_publish(msg) -> None:
         _record_evidence({"message_type": type(msg).__name__, "raw": str(msg)})
 
 
+def _issue_fingerprint(caller: str, rights, constraints: dict, ttl: int) -> str:
+    digest = hashlib.sha256(canonical({
+        "operation": "issue",
+        "caller": caller,
+        "rights": rights,
+        "constraints": constraints,
+        "ttl_seconds": ttl,
+        "issuer": ISSUER,
+        "trust_domain": TRUST_DOMAIN,
+        "broker_measurement": BROKER_MEASUREMENT,
+        "policy_version": POLICY_VERSION,
+    })).hexdigest()
+    return "sha256:" + digest
+
+
+def _issue_jti(correlation_id: str) -> str:
+    return "issue-" + hashlib.sha256(correlation_id.encode("utf-8")).hexdigest()
+
+
+def _mint_issued_capability(caller, rights, constraints, ttl):
+    cap = issue(
+        caller=caller,
+        issuer=ISSUER,
+        rights=rights,
+        constraints=constraints,
+        ttl_seconds=ttl,
+        trust_domain=TRUST_DOMAIN,
+        broker_measurement=BROKER_MEASUREMENT,
+        policy_version=POLICY_VERSION,
+    )
+    encoded = canonical(cap)
+    stable = json.loads(encoded)
+    if not isinstance(stable, dict) or canonical(stable) != encoded:
+        raise RuntimeError("issued capability canonical form is unstable")
+    return stable, sign(stable)
+
+
+def _issue_response(body: dict, record, *, created: bool) -> dict:
+    _record_evidence(
+        {
+            "event_id": "issue:" + hashlib.sha256(record.correlation_id.encode("utf-8")).hexdigest(),
+            "message_type": "CapabilityIssued",
+            "message_id": record.assertion_jti,
+            "correlation_id": record.correlation_id,
+            "request_digest": record.fingerprint,
+            "capability_id": record.capability.get("id"),
+            "capability": record.capability,
+            "signature": record.signature,
+            "audience": record.capability.get("audience", ""),
+            "issuer": record.capability.get("issuer", ""),
+        }
+    )
+    return {
+        "status": "ok",
+        "message_id": record.assertion_jti,
+        "correlation_id": record.correlation_id,
+        "capability": record.capability,
+        "signature": record.signature,
+        "idempotent_replay": not created,
+        "platform": os.environ.get("PLANE_PLATFORM", "dev"),
+        "broker_public_key_b64": public_key_b64(),
+        "_identity_source": body.get("_identity_source"),
+    }
+
+
 def handle_issue(body: dict) -> dict:
     try:
         body = bind_issue_request(body)
@@ -128,45 +193,66 @@ def handle_issue(body: dict) -> dict:
         return {"status": "error", "error": "TTL must be an integer"}
     ttl = min(raw_ttl, 300)
     constraints = dict(body.get("constraints") or {})
+    supplied_correlation = "correlation_id" in body and body.get("correlation_id") is not None
+    correlation_id = body.get("correlation_id")
+    if supplied_correlation:
+        if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128 or "\x00" in correlation_id:
+            return {"status": "error", "error": "correlation_id must be a non-empty string up to 128 characters"}
+    else:
+        correlation_id = uuid.uuid4().hex
     try:
         policy.authorize(caller, rights, constraints, ttl)
     except PolicyError as e:
         return {"status": "error", "error": str(e)}
-    cap = issue(
-        caller=caller,
-        issuer=ISSUER,
-        rights=rights,
-        constraints=constraints,
-        ttl_seconds=ttl,
-        trust_domain=TRUST_DOMAIN,
-        broker_measurement=BROKER_MEASUREMENT,
-        policy_version=POLICY_VERSION,
-    )
-    sig = sign(cap)
-    correlation_id = body.get("correlation_id") or uuid.uuid4().hex
-    if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
-        return {"status": "error", "error": "correlation_id must be a non-empty string up to 128 characters"}
-    issue_message_id = uuid.uuid4().hex
-    _record_evidence(
-        {
-            "message_type": "CapabilityIssued",
-            "message_id": issue_message_id,
+    if not supplied_correlation:
+        cap, sig = _mint_issued_capability(caller, rights, constraints, ttl)
+        message_id = uuid.uuid4().hex
+        _record_evidence(
+            {
+                "event_id": "issue:" + hashlib.sha256(correlation_id.encode("utf-8")).hexdigest(),
+                "message_type": "CapabilityIssued",
+                "message_id": message_id,
+                "correlation_id": correlation_id,
+                "capability_id": cap.get("id"),
+                "capability": cap,
+                "signature": sig,
+                "audience": cap.get("audience", ""),
+                "issuer": cap.get("issuer", ""),
+            }
+        )
+        return {
+            "status": "ok",
+            "message_id": message_id,
             "correlation_id": correlation_id,
-            "capability_id": cap["id"],
-            "audience": cap.get("audience", ""),
-            "issuer": cap.get("issuer", ""),
+            "capability": cap,
+            "signature": sig,
+            "idempotent_replay": False,
+            "platform": os.environ.get("PLANE_PLATFORM", "dev"),
+            "broker_public_key_b64": public_key_b64(),
+            "_identity_source": body.get("_identity_source"),
         }
-    )
-    return {
-        "status": "ok",
-        "message_id": issue_message_id,
-        "correlation_id": correlation_id,
-        "capability": cap,
-        "signature": sig,
-        "platform": os.environ.get("PLANE_PLATFORM", "dev"),
-        "broker_public_key_b64": public_key_b64(),
-        "_identity_source": body.get("_identity_source"),
-    }
+    fingerprint = _issue_fingerprint(caller, rights, constraints, ttl)
+    try:
+        record, created = get_issuance_store().commit_or_replay(
+            correlation_id=correlation_id,
+            fingerprint=fingerprint,
+            assertion_jti=_issue_jti(correlation_id),
+            now=time.time(),
+            mint=lambda: _mint_issued_capability(caller, rights, constraints, ttl),
+        )
+    except IssuanceIdempotencyConflict:
+        return {"status": "error", "error": "issue_correlation_replay_conflict"}
+    except IssuanceIdempotencyExpired as exc:
+        return {
+            "status": "error",
+            "error": "issued_capability_expired",
+            "correlation_id": correlation_id,
+            "capability_id": exc.record.capability.get("id"),
+            "idempotent_replay": True,
+        }
+    except (IssuanceIdempotencyReplay, IssuanceIdempotencyCorrupt):
+        return {"status": "error", "error": "issuance_idempotency_corrupt"}
+    return _issue_response(body, record, created=created)
 
 
 def _delegated_event_id(assertion_jti: str) -> str:

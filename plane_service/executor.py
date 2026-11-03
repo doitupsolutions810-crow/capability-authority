@@ -176,13 +176,15 @@ class Executor:
             json.dumps({"required": required, "input": action_input or {}},
                        sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest())
-        replay_key = (str(cap.get("id")), action)
+        if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
+            correlation_id = uuid.uuid4().hex
+        replay_key = (correlation_id, str(cap.get("id")), action)
 
         with self._lock:
             prior = self._receipts.get(replay_key)
             if prior is not None:
                 if prior["payload_digest"] != payload_digest:
-                    return {"status": "error", "error": "capability_action_replay_conflict"}
+                    return {"status": "error", "error": "execution_replay_conflict"}
                 replayed = copy.deepcopy(prior["result"])
                 replayed["idempotent_replay"] = True
                 return replayed
@@ -190,7 +192,6 @@ class Executor:
                 return {"status": "error", "error": "rate limited"}
 
             message_id = message_id or uuid.uuid4().hex
-            correlation_id = correlation_id or uuid.uuid4().hex
 
             if (kind, resource, method) == ("Execute", "artifact.write_demo", "POST"):
                 result = self._dispatch_demo_artifact(
@@ -229,12 +230,12 @@ class Executor:
             return self._store_execution(replay_key, payload_digest, result)
 
     def _store_execution(self, replay_key, payload_digest, result):
-        """Keep the first receipt for a capability id and action."""
+        """Keep the first receipt for one correlation, capability, and action."""
         with self._lock:
             prior = self._receipts.get(replay_key)
             if prior is not None:
                 if prior["payload_digest"] != payload_digest:
-                    return {"status": "error", "error": "capability_action_replay_conflict"}
+                    return {"status": "error", "error": "execution_replay_conflict"}
                 replayed = copy.deepcopy(prior["result"])
                 replayed["idempotent_replay"] = True
                 return replayed

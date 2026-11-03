@@ -18,7 +18,7 @@ class IntentWorkflow:
         from plane_service.spiffe_binding import bind_issue_request
         bound = bind_issue_request(intent)
         caller = bound["caller"]
-        rights = intent.get("rights") or [{"type": "read", "resource": "demo"}]
+        rights = intent.get("rights") or [{"type": "read", "resource": "demo", "method": "GET"}]
         constraints = dict(intent.get("constraints") or {})
         ttl = int(intent.get("ttl_seconds") or 60)
         try:
