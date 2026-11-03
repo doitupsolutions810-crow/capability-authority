@@ -30,6 +30,13 @@ def _normalized_event_id(event):
     return event_id if isinstance(event_id, str) and event_id.strip() else None
 
 
+def _normalized_delegation_correlation_id(event):
+    if not isinstance(event, dict) or event.get("message_type") != "CapabilityDelegated":
+        return None
+    correlation_id = event.get("correlation_id")
+    return correlation_id if isinstance(correlation_id, str) and correlation_id.strip() else None
+
+
 class EvidenceWarehouse:
     def __init__(self, db_path=None):
         root = Path(__file__).resolve().parents[1]
@@ -59,6 +66,41 @@ class EvidenceWarehouse:
                             (event_id, row_id),
                         )
 
+            if "delegation_correlation_id" not in columns:
+                c.execute("ALTER TABLE evidence ADD COLUMN delegation_correlation_id TEXT")
+                # Backfill existing delegation records before adding the unique fence.
+                rows = c.execute(
+                    "SELECT id, payload FROM evidence WHERE delegation_correlation_id IS NULL"
+                ).fetchall()
+                for row_id, payload in rows:
+                    event = json.loads(payload)
+                    correlation_id = _normalized_delegation_correlation_id(event)
+                    if correlation_id is not None:
+                        c.execute(
+                            "UPDATE evidence SET delegation_correlation_id = ? WHERE id = ?",
+                            (correlation_id, row_id),
+                        )
+
+            delegation_index_exists = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'evidence_delegation_correlation_unique'"
+            ).fetchone()
+            if not delegation_index_exists:
+                duplicate_correlations = c.execute(
+                    "SELECT delegation_correlation_id, COUNT(*) FROM evidence "
+                    "WHERE delegation_correlation_id IS NOT NULL "
+                    "GROUP BY delegation_correlation_id HAVING COUNT(*) > 1"
+                ).fetchall()
+                if duplicate_correlations:
+                    raise RuntimeError(
+                        "cannot enforce delegation correlation identity; duplicate historical correlation_id values exist"
+                    )
+                c.execute(
+                    "CREATE UNIQUE INDEX evidence_delegation_correlation_unique "
+                    "ON evidence(delegation_correlation_id) "
+                    "WHERE delegation_correlation_id IS NOT NULL"
+                )
+
             index_exists = c.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' "
                 "AND name = 'evidence_event_id_unique'"
@@ -81,6 +123,7 @@ class EvidenceWarehouse:
     def append(self, event):
         event = dict(event)
         event_id = event.get("event_id")
+        delegation_correlation_id = _normalized_delegation_correlation_id(event)
         if event_id is not None:
             if not isinstance(event_id, str) or not event_id.strip():
                 raise ValueError("event_id must be a non-empty string when provided")
@@ -109,14 +152,26 @@ class EvidenceWarehouse:
                     result["_idempotent_replay"] = True
                     return result
 
+            if delegation_correlation_id is not None:
+                existing_delegation = c.execute(
+                    "SELECT event_id FROM evidence WHERE delegation_correlation_id = ?",
+                    (delegation_correlation_id,),
+                ).fetchone()
+                if existing_delegation:
+                    raise ValueError(
+                        f"delegation correlation_id {delegation_correlation_id!r} was already committed"
+                    )
+
             row = c.execute(
                 "SELECT digest FROM evidence ORDER BY id DESC LIMIT 1"
             ).fetchone()
             prev = row[0] if row else "0" * 64
             digest = _digest(prev, event)
             c.execute(
-                "INSERT INTO evidence (payload, prev_digest, digest, event_id) VALUES (?,?,?,?)",
-                (json.dumps(event, default=str), prev, digest, event_id),
+                "INSERT INTO evidence "
+                "(payload, prev_digest, digest, event_id, delegation_correlation_id) "
+                "VALUES (?,?,?,?,?)",
+                (json.dumps(event, default=str), prev, digest, event_id, delegation_correlation_id),
             )
             c.commit()
 
