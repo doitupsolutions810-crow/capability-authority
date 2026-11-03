@@ -137,6 +137,29 @@ class EvidenceWarehouseConcurrencyTests(unittest.TestCase):
                     "correlation_id": "legacy-correlation",
                 })
 
+    def test_legacy_migration_fails_closed_on_duplicate_delegation_correlations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "legacy-duplicates.db"
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "CREATE TABLE evidence "
+                    "(id INTEGER PRIMARY KEY, payload TEXT, prev_digest TEXT, digest TEXT UNIQUE, event_id TEXT)"
+                )
+                for index in range(2):
+                    event = {
+                        "event_id": f"delegation:legacy-{index}",
+                        "message_type": "CapabilityDelegated",
+                        "message_id": f"legacy-{index}",
+                        "correlation_id": "reused-legacy-correlation",
+                    }
+                    connection.execute(
+                        "INSERT INTO evidence (payload, prev_digest, digest, event_id) VALUES (?,?,?,?)",
+                        (json.dumps(event), "0" * 64, f"legacy-digest-{index}", event["event_id"]),
+                    )
+
+            with self.assertRaisesRegex(RuntimeError, "duplicate historical correlation_id"):
+                EvidenceWarehouse(db)
+
     def test_concurrent_duplicate_event_id_is_committed_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             warehouse = EvidenceWarehouse(Path(tmp) / "evidence.db")
