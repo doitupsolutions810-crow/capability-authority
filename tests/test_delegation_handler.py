@@ -38,6 +38,15 @@ class MemoryIndex:
                 if existing != event:
                     raise ValueError("event_id was already committed with a different payload")
                 return {"durable": True, "idempotent_replay": True}
+            if event.get("message_type") == "CapabilityDelegated":
+                existing_correlation = next(
+                    (row for row in self.rows
+                     if row.get("message_type") == "CapabilityDelegated"
+                     and row.get("correlation_id") == event.get("correlation_id")),
+                    None,
+                )
+                if existing_correlation is not None:
+                    raise ValueError("delegation correlation_id was already committed")
             self.rows.append(dict(event))
             return {"durable": True}
 
@@ -123,6 +132,53 @@ def test_concurrent_same_correlation_returns_one_durable_child(delegation_env):
     assert all(result["status"] == "ok" for result in results)
     assert results[0]["capability"] == results[1]["capability"]
     assert sum(result.get("idempotent_replay") is False for result in results) == 1
+    assert len(index.rows) == 1
+
+
+def test_concurrent_same_correlation_with_distinct_assertion_jtis_commits_one_child(delegation_env):
+    requester_key, index = delegation_env
+    first_request = make_request(requester_key)
+    second_request = {**first_request, "requester_assertion": dict(first_request["requester_assertion"])}
+    unsigned = {
+        key: value for key, value in second_request["requester_assertion"].items()
+        if key != "signature"
+    }
+    unsigned["jti"] = "jti-handler-test-002"
+    second_request["requester_assertion"] = {
+        **unsigned,
+        "signature": base64.b64encode(requester_key.sign(canonical(unsigned))).decode("ascii"),
+    }
+
+    # Force both handlers past the pre-issuance correlation lookup before either
+    # can append, reproducing the race that a timing-only test could miss.
+    barrier = threading.Barrier(2)
+    query_lock = threading.Lock()
+    synchronized_lookups = 0
+    original_query = index.query
+
+    def synchronized_query(**filters):
+        nonlocal synchronized_lookups
+        should_wait = False
+        if (
+            filters.get("message_type") == "CapabilityDelegated"
+            and filters.get("correlation_id") == first_request["correlation_id"]
+        ):
+            with query_lock:
+                if synchronized_lookups < 2:
+                    synchronized_lookups += 1
+                    should_wait = True
+            if should_wait:
+                barrier.wait(timeout=5)
+        return original_query(**filters)
+
+    index.query = synchronized_query
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(server.handle_delegate, [first_request, second_request]))
+
+    assert all(result["status"] == "ok" for result in results)
+    assert results[0]["capability"] == results[1]["capability"]
+    assert sum(result.get("idempotent_replay") is False for result in results) == 1
+    assert sum(result.get("idempotent_replay") is True for result in results) == 1
     assert len(index.rows) == 1
 
 
