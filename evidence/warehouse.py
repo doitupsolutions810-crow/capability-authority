@@ -1,9 +1,14 @@
 """Hash-chained evidence warehouse (SQLite)."""
-import hashlib, json, sqlite3, time, os
+import hashlib
+import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
+
 
 def _canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode()
+
 
 def _digest(prev, event):
     h = hashlib.sha256()
@@ -11,37 +16,162 @@ def _digest(prev, event):
     h.update(_canonical(event))
     return h.hexdigest()
 
+
+def _logical_event(event):
+    """Remove projection/receipt metadata when comparing an idempotent retry."""
+    return {
+        key: value for key, value in event.items()
+        if key not in {"_indexed_at", "_digest", "_prev_digest"}
+    }
+
+
+def _normalized_event_id(event):
+    event_id = event.get("event_id") if isinstance(event, dict) else None
+    return event_id if isinstance(event_id, str) and event_id.strip() else None
+
+
 class EvidenceWarehouse:
     def __init__(self, db_path=None):
         root = Path(__file__).resolve().parents[1]
         self.db_path = Path(db_path or root / "data" / "evidence.db")
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as c:
-            c.execute("CREATE TABLE IF NOT EXISTS evidence (id INTEGER PRIMARY KEY, payload TEXT, prev_digest TEXT, digest TEXT UNIQUE)")
-    def append(self, event):
-        with sqlite3.connect(str(self.db_path)) as c:
-            c.row_factory = sqlite3.Row
-            row = c.execute("SELECT digest FROM evidence ORDER BY id DESC LIMIT 1").fetchone()
-            prev = row["digest"] if row else "0"*64
-            digest = _digest(prev, event)
-            c.execute("INSERT INTO evidence (payload, prev_digest, digest) VALUES (?,?,?)", (json.dumps(event, default=str), prev, digest))
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
+            c.execute("PRAGMA busy_timeout = 30000")
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS evidence "
+                "(id INTEGER PRIMARY KEY, payload TEXT, prev_digest TEXT, digest TEXT UNIQUE)"
+            )
+            columns = {row[1] for row in c.execute("PRAGMA table_info(evidence)")}
+            needs_identity_migration = "event_id" not in columns
+            if needs_identity_migration:
+                c.execute("ALTER TABLE evidence ADD COLUMN event_id TEXT")
+                # Backfill only when introducing the column. Doing this on every
+                # append would repeatedly scan all historical no-ID events.
+                rows = c.execute(
+                    "SELECT id, payload FROM evidence WHERE event_id IS NULL"
+                ).fetchall()
+                for row_id, payload in rows:
+                    event = json.loads(payload)
+                    event_id = _normalized_event_id(event)
+                    if event_id is not None:
+                        c.execute(
+                            "UPDATE evidence SET event_id = ? WHERE id = ?",
+                            (event_id, row_id),
+                        )
+
+            index_exists = c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'evidence_event_id_unique'"
+            ).fetchone()
+            if not index_exists:
+                duplicates = c.execute(
+                    "SELECT event_id, COUNT(*) FROM evidence "
+                    "WHERE event_id IS NOT NULL GROUP BY event_id HAVING COUNT(*) > 1"
+                ).fetchall()
+                if duplicates:
+                    raise RuntimeError(
+                        "cannot enforce evidence event identity; duplicate historical event_id values exist"
+                    )
+                c.execute(
+                    "CREATE UNIQUE INDEX evidence_event_id_unique "
+                    "ON evidence(event_id) WHERE event_id IS NOT NULL"
+                )
             c.commit()
+
+    def append(self, event):
         event = dict(event)
-        event["_digest"] = digest
-        event["_prev_digest"] = prev
-        return event
+        event_id = event.get("event_id")
+        if event_id is not None:
+            if not isinstance(event_id, str) or not event_id.strip():
+                raise ValueError("event_id must be a non-empty string when provided")
+
+        # BEGIN IMMEDIATE serializes idempotency lookup and chain-tip updates
+        # across independent SQLite connections/processes.
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
+            c.execute("PRAGMA busy_timeout = 30000")
+            c.execute("BEGIN IMMEDIATE")
+
+            if event_id is not None:
+                existing = c.execute(
+                    "SELECT payload, prev_digest, digest FROM evidence WHERE event_id = ?",
+                    (event_id,),
+                ).fetchone()
+                if existing:
+                    existing_event = json.loads(existing[0])
+                    if _canonical(_logical_event(existing_event)) != _canonical(_logical_event(event)):
+                        raise ValueError(
+                            f"event_id {event_id!r} was already committed with a different payload"
+                        )
+                    c.commit()
+                    result = dict(existing_event)
+                    result["_digest"] = existing[2]
+                    result["_prev_digest"] = existing[1]
+                    result["_idempotent_replay"] = True
+                    return result
+
+            row = c.execute(
+                "SELECT digest FROM evidence ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            prev = row[0] if row else "0" * 64
+            digest = _digest(prev, event)
+            c.execute(
+                "INSERT INTO evidence (payload, prev_digest, digest, event_id) VALUES (?,?,?,?)",
+                (json.dumps(event, default=str), prev, digest, event_id),
+            )
+            c.commit()
+
+        result = dict(event)
+        result["_digest"] = digest
+        result["_prev_digest"] = prev
+        result["_idempotent_replay"] = False
+        return result
+
+    def read_verified_events(self):
+        """Return the ordered ledger only after verifying identities and hashes."""
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
+            c.execute("PRAGMA busy_timeout = 30000")
+            c.execute("BEGIN")
+            rows = c.execute(
+                "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
+            ).fetchall()
+
+        prev = "0" * 64
+        events = []
+        for payload, prev_d, digest, stored_event_id in rows:
+            if prev_d != prev:
+                raise ValueError("evidence warehouse chain is invalid: prev mismatch")
+            event = json.loads(payload)
+            if not isinstance(event, dict):
+                raise ValueError("evidence warehouse chain is invalid: payload is not an object")
+            if _normalized_event_id(event) != stored_event_id:
+                raise ValueError("evidence warehouse chain is invalid: event identity mismatch")
+            expected = _digest(prev, event)
+            if expected != digest:
+                raise ValueError("evidence warehouse chain is invalid: digest mismatch")
+            projected = dict(event)
+            projected["_digest"] = digest
+            events.append(projected)
+            prev = digest
+        return events
+
     def verify_chain(self):
-        with sqlite3.connect(str(self.db_path)) as c:
-            rows = c.execute("SELECT payload, prev_digest, digest FROM evidence ORDER BY id").fetchall()
-        prev = "0"*64
-        for payload, prev_d, digest in rows:
+        with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
+            rows = c.execute(
+                "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
+            ).fetchall()
+        prev = "0" * 64
+        for payload, prev_d, digest, stored_event_id in rows:
             if prev_d != prev:
                 return {"ok": False, "error": "prev mismatch"}
-            expect = _digest(prev, json.loads(payload))
+            event = json.loads(payload)
+            if _normalized_event_id(event) != stored_event_id:
+                return {"ok": False, "error": "event identity mismatch"}
+            expect = _digest(prev, event)
             if expect != digest:
                 return {"ok": False, "error": "digest mismatch"}
             prev = digest
         return {"ok": True, "length": len(rows), "tip": prev}
+
 
 def get_warehouse():
     return EvidenceWarehouse()
