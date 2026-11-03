@@ -15,6 +15,7 @@ echo "==> tests"
 python3 tests/test_plane.py
 python3 tests/test_evidence_receipt_spiffe.py
 python3 tests/test_agents.py
+python3 -m pytest -q tests/test_delegation.py tests/test_delegation_handler.py
 
 echo "==> demos"
 python3 scripts/demo_hands.py
