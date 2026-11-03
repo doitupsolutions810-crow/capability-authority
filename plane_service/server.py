@@ -220,7 +220,17 @@ def handle_delegate(body: dict) -> dict:
             return {"status": "error", "error": "delegation_correlation_replay_conflict"}
         if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
             return {"status": "error", "error": "prior delegation evidence is incomplete"}
-        return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": row["capability"], "signature": row["signature"], "idempotent_replay": True}
+        prior_child = row["capability"]
+        prior_expiry = prior_child.get("expires_at")
+        if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not __import__("math").isfinite(prior_expiry):
+            return {"status": "error", "error": "prior delegated capability expiry is invalid"}
+        if prior_expiry <= time.time():
+            return {
+                "status": "error", "error": "delegated_capability_expired",
+                "message_id": row.get("message_id"), "correlation_id": correlation_id,
+                "capability_id": prior_child.get("id"), "idempotent_replay": True,
+            }
+        return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
     if check_bounds(parent, acceptance):
         return {"status": "error", "error": "parent capability bounds rejected"}
     try:
