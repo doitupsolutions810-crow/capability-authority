@@ -125,6 +125,12 @@ def validate_delegation(
         raise DelegationError("parent capability issue time is invalid")
     if not isinstance(audience, str) or audience not in allowed_audiences:
         raise DelegationError("delegated audience is not allowlisted")
+    constraints = parent.get("constraints")
+    if not isinstance(constraints, dict):
+        raise DelegationError("parent constraints must be an object")
+    delegated_audiences = constraints.get("delegation_audiences")
+    if not isinstance(delegated_audiences, list) or audience not in delegated_audiences:
+        raise DelegationError("delegated audience is not authorized by parent constraints")
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= max_ttl_seconds:
         raise DelegationError("delegated TTL must be an integer within policy")
     remaining = math.floor(parent_expiry - now_ts)
