@@ -294,6 +294,31 @@ def test_same_correlation_with_fresh_assertion_jti_is_rejected(delegation_env, m
     assert len(index.rows) == 1
 
 
+def test_same_correlation_rejects_same_jti_with_altered_signed_assertion(delegation_env):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    first = server.handle_delegate(request)
+    assert first["status"] == "ok"
+
+    altered = {**request, "requester_assertion": dict(request["requester_assertion"])}
+    unsigned = {
+        key: value for key, value in altered["requester_assertion"].items()
+        if key != "signature"
+    }
+    unsigned["expires_at"] = (
+        datetime.now(timezone.utc) + timedelta(seconds=25)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    altered["requester_assertion"] = {
+        **unsigned,
+        "signature": base64.b64encode(requester_key.sign(canonical(unsigned))).decode("ascii"),
+    }
+
+    result = server.handle_delegate(altered)
+    assert result["status"] == "error"
+    assert result["error"] == "delegation_correlation_replay_conflict"
+    assert len(index.rows) == 1
+
+
 def test_same_correlation_reconciles_after_requester_assertion_expiry(delegation_env, monkeypatch):
     requester_key, index = delegation_env
     request = make_request(requester_key)
