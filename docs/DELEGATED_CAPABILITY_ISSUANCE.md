@@ -12,6 +12,21 @@ The new `POST /v1/capabilities/delegate` route issues an attenuated child capabi
 6. Child TTL is capped by the parent's remaining lifetime, the Authority's maximum TTL, and the configured maximum delegation depth. Parent constraints are inherited unchanged.
 7. The child capability and signed response are written to the durable evidence index before the endpoint returns success. A repeated correlation ID returns the same child only for an identical request; reusing the assertion `jti` with a different correlation ID is rejected.
 
+## Bootstrap parent capability
+
+AVRONE cannot request its own parent capability by passing a JSON `caller`; that would reintroduce caller spoofing. An Authority operator provisions the narrow root parent capability out of band on the Authority host:
+
+```bash
+export PLANE_DELEGATION_REQUESTER_ID=spiffe://prod/agent/avrone
+export PLANE_DELEGATION_REQUESTER_PUBLIC_KEY_FILE=/run/secrets/avrone-delegation-requester.pub
+export PLANE_DELEGATION_ALLOWED_AUDIENCES=spiffe://prod/agent/swarm
+export PLANE_AVRONE_PARENT_CAPABILITY_FILE=/run/secrets/avrone-swarm-parent-capability.json
+export PLANE_AVRONE_PARENT_CAPABILITY_CORRELATION_ID=avrone-swarm-root-2026-11-03
+python scripts/issue_avrone_swarm_parent.py
+```
+
+The script issues only `Execute:swarm.jobs:POST`, binds the parent capability to AVRONE, embeds the exact delegated-audience scope in its constraints, persists the issuance evidence, and writes the capability/signature file atomically with mode `0600`. Re-running with the same correlation and exact request restores the same capability. A different request or different existing output file is refused. Mount the resulting file read-only into AVRONE as an independent secret/configuration artifact. Never commit it.
+
 ## Request
 
 ```json
