@@ -220,6 +220,7 @@ def handle_delegate(body: dict) -> dict:
             # assertion identity. Otherwise a fresh JTI could receive the prior
             # child without being durably recorded under its own event_id.
             "requester_assertion_jti": jti,
+            "requester_assertion_digest": "sha256:" + hashlib.sha256(canonical(assertion)).hexdigest(),
         })).hexdigest()
     except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
         return {"status": "error", "error": "delegation request is not canonical finite JSON"}
