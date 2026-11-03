@@ -27,11 +27,13 @@ def write_private_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
-            existing = json.loads(path.read_text("utf-8"))
+            existing_bytes = path.read_bytes()
+            existing = json.loads(existing_bytes.decode("utf-8"))
         except Exception as exc:
             raise RuntimeError("existing parent-capability file is not valid JSON; refusing overwrite") from exc
-        if not isinstance(existing, dict):
-            raise RuntimeError("existing parent-capability file is not an object; refusing overwrite")
+        if not isinstance(existing, dict) or existing_bytes != data:
+            raise RuntimeError("existing parent-capability file differs; refusing overwrite")
+        return
     temp = path.with_name("." + path.name + "." + uuid.uuid4().hex + ".tmp")
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
