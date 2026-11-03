@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-BASE=${1:-http://127.0.0.1:8090}
+BASE=${1:-http://127.0.0.1:8095}
 curl -sS "$BASE/health" | python3 -m json.tool
 ISSUE=$(curl -sS -X POST "$BASE/v1/capabilities/issue" -H 'content-type: application/json' -d '{"caller":"spiffe://prod/agent/dev","rights":[{"type":"read","resource":"demo"}],"ttl_seconds":60}')
 echo "$ISSUE" | python3 -m json.tool

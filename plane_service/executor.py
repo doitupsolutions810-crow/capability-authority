@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import re
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -44,6 +46,8 @@ class Executor:
         self.rate_limiter = RateLimiter()
         self.crl = set()
         self.acceptance = load_acceptance()
+        self._receipts = {}
+        self._lock = threading.RLock()
 
     @staticmethod
     def _artifact_path(correlation_id: str) -> Path:
@@ -165,47 +169,75 @@ class Executor:
         kind = required["type"]
         resource = required["resource"]
         method = required["method"]
+        action = f"{kind}:{resource}:{method}"
         rl = (cap.get("constraints") or {}).get("rate_limit") or {}
-        key = f"{cap.get('id')}:{kind}:{resource}:{method}"
-        if not self.rate_limiter.allow(key, int(rl.get("count") or 5), int(rl.get("window_seconds") or 60)):
-            return {"status": "error", "error": "rate limited"}
-
-        message_id = message_id or uuid.uuid4().hex
-        correlation_id = correlation_id or uuid.uuid4().hex
+        rate_key = f"{cap.get('id')}:{action}"
         payload_digest = payload_digest or ("sha256:" + hashlib.sha256(
             json.dumps({"required": required, "input": action_input or {}},
                        sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest())
+        replay_key = (str(cap.get("id")), action)
 
-        if (kind, resource, method) == ("Execute", "artifact.write_demo", "POST"):
-            result = self._dispatch_demo_artifact(
-                cap=cap, required=required, action_input=action_input,
-                message_id=message_id, correlation_id=correlation_id,
-                payload_digest=payload_digest,
-                previous_receipt_digest=previous_receipt_digest,
-            )
-            return result
+        with self._lock:
+            prior = self._receipts.get(replay_key)
+            if prior is not None:
+                if prior["payload_digest"] != payload_digest:
+                    return {"status": "error", "error": "capability_action_replay_conflict"}
+                replayed = copy.deepcopy(prior["result"])
+                replayed["idempotent_replay"] = True
+                return replayed
+            if not self.rate_limiter.allow(rate_key, int(rl.get("count") or 5), int(rl.get("window_seconds") or 60)):
+                return {"status": "error", "error": "rate limited"}
 
-        # Other allowlisted capabilities remain authorization-only until each
-        # receives its own reviewed dispatcher and bounded input contract.
-        receipt = {
-            "message_id": message_id,
-            "correlation_id": correlation_id,
-            "capability_id": cap["id"],
-            "issuer": cap.get("issuer"),
-            "executor": "plane-authorization-gate-1",
-            "action": f"{kind}:{resource}:{method}",
-            "resource": resource,
-            "method": method,
-            "outcome": "authorized_not_executed",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "payload_digest": payload_digest,
-            "previous_receipt_digest": previous_receipt_digest,
-        }
-        receipt["signature"] = sign(receipt)
-        return {
-            "status": "authorized",
-            "result": "not_executed",
-            "execution_status": "NOT_IMPLEMENTED",
-            "receipt": receipt,
-        }
+            message_id = message_id or uuid.uuid4().hex
+            correlation_id = correlation_id or uuid.uuid4().hex
+
+            if (kind, resource, method) == ("Execute", "artifact.write_demo", "POST"):
+                result = self._dispatch_demo_artifact(
+                    cap=cap, required=required, action_input=action_input,
+                    message_id=message_id, correlation_id=correlation_id,
+                    payload_digest=payload_digest,
+                    previous_receipt_digest=previous_receipt_digest,
+                )
+            else:
+                # Other allowlisted capabilities remain authorization-only until each
+                # receives its own reviewed dispatcher and bounded input contract.
+                receipt = {
+                    "message_id": message_id,
+                    "correlation_id": correlation_id,
+                    "capability_id": cap["id"],
+                    "issuer": cap.get("issuer"),
+                    "executor": "plane-authorization-gate-1",
+                    "action": action,
+                    "resource": resource,
+                    "method": method,
+                    "outcome": "authorized_not_executed",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "payload_digest": payload_digest,
+                    "previous_receipt_digest": previous_receipt_digest,
+                }
+                receipt["signature"] = sign(receipt)
+                result = {
+                    "status": "authorized",
+                    "result": "not_executed",
+                    "execution_status": "NOT_IMPLEMENTED",
+                    "idempotent_replay": False,
+                    "receipt": receipt,
+                }
+            if result.get("status") not in ("authorized", "executed"):
+                return result
+            return self._store_execution(replay_key, payload_digest, result)
+
+    def _store_execution(self, replay_key, payload_digest, result):
+        """Keep the first receipt for a capability id and action."""
+        with self._lock:
+            prior = self._receipts.get(replay_key)
+            if prior is not None:
+                if prior["payload_digest"] != payload_digest:
+                    return {"status": "error", "error": "capability_action_replay_conflict"}
+                replayed = copy.deepcopy(prior["result"])
+                replayed["idempotent_replay"] = True
+                return replayed
+            stored = copy.deepcopy(result)
+            self._receipts[replay_key] = {"payload_digest": payload_digest, "result": stored}
+            return copy.deepcopy(stored)

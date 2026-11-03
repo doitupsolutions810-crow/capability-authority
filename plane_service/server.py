@@ -6,12 +6,13 @@ import hashlib
 import json
 import uuid
 import os
+import socket
 import sys
 import time
 import stat
 import math
 import re
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -36,6 +37,11 @@ from plane_service.issuance_idempotency import (
     get_issuance_store,
 )
 from plane_service.spiffe_identity import fetch_workload_identity
+
+# 8090 belongs to CycleKernal. This plane listens elsewhere unless PLANE_PORT is set.
+DEFAULT_PORT = 8095
+MAX_BODY_BYTES = 65536
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 
 TRUST_DOMAIN = os.environ.get("PLANE_TRUST_DOMAIN", "prod")
 POLICY_VERSION = int(os.environ.get("PLANE_POLICY_VERSION", "1"))
@@ -501,6 +507,8 @@ def handle_execute(body: dict) -> dict:
         payload_digest=payload_digest,
         previous_receipt_digest=previous_receipt_digest,
     )
+    if result.get("idempotent_replay"):
+        return result
     if result.get("status") in ("authorized", "executed"):
         receipt = result.get("receipt") or {}
         _record_evidence(
@@ -583,6 +591,9 @@ def _reject_json_constant(value):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Bound stalled clients so one unread body cannot hold a worker forever.
+    timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[broker+executor] {self.command} {self.path} " + (fmt % args))
 
@@ -594,29 +605,53 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding"):
             self._json(501, {"status": "error", "error": "transfer-encoded request bodies are unsupported"})
             return
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except (TypeError, ValueError, OverflowError):
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or raw_length == "":
+            n = 0
+        elif len(raw_length) > 10 or not raw_length.isdigit():
             self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            self.close_connection = True
             return
+        else:
+            try:
+                n = int(raw_length)
+            except (TypeError, ValueError, OverflowError):
+                self._json(400, {"status": "error", "error": "invalid Content-Length"})
+                self.close_connection = True
+                return
         if n < 0:
             self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            self.close_connection = True
             return
-        if n > 65536:
+        if n > MAX_BODY_BYTES:
             self._json(413, {"status": "error", "error": "request body exceeds 64 KiB"})
-            return
-        raw = self.rfile.read(n) if n else b"{}"
-        if len(raw) != n:
-            self._json(400, {"status": "error", "error": "incomplete request body"})
+            self.close_connection = True
             return
         try:
+            raw = self.rfile.read(n) if n else b"{}"
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+            try:
+                self._json(408, {"status": "error", "error": "request body read timed out"})
+            except Exception:
+                pass
+            return
+        if len(raw) != n:
+            self._json(400, {"status": "error", "error": "incomplete request body"})
+            self.close_connection = True
+            return
+        try:
+            decoded = raw.decode("utf-8")
             body = json.loads(
-                raw.decode("utf-8") or "{}",
+                decoded or "{}",
                 object_pairs_hook=_unique_json_object,
                 parse_constant=_reject_json_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, OverflowError):
             self._json(400, {"status": "error", "error": "malformed, duplicate-key, or non-finite JSON request body"})
+            return
+        except Exception:
+            self._json(400, {"status": "error", "error": "malformed JSON request body"})
             return
         if not isinstance(body, dict):
             self._json(400, {"status": "error", "error": "request body must be a JSON object"})
@@ -685,10 +720,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class PlaneHTTPServer(ThreadingHTTPServer):
+    """One stalled client must not block the accept loop or other requests."""
+
+    daemon_threads = True
+    request_queue_size = 256
+    allow_reuse_address = True
+
+
+def make_server(host: str, port: int) -> PlaneHTTPServer:
+    return PlaneHTTPServer((host, port), Handler)
+
+
 def main() -> None:
     host = os.environ.get("PLANE_HOST", "127.0.0.1")
-    port = int(os.environ.get("PLANE_PORT", "8090"))
-    httpd = HTTPServer((host, port), Handler)
+    port = int(os.environ.get("PLANE_PORT", str(DEFAULT_PORT)))
+    httpd = make_server(host, port)
     print(f"Broker+Executor on http://{host}:{port} (ed25519)")
     httpd.serve_forever()
 

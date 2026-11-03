@@ -1,7 +1,7 @@
 from rings.ingress import enter
 from control12.actuation_adapter import Intent, PlaneClient
 
-def plan_and_actuate(intent, plane_base="http://127.0.0.1:8090"):
+def plan_and_actuate(intent, plane_base="http://127.0.0.1:8095"):
     admitted = enter("control12", intent if isinstance(intent, dict) else {})
     if admitted.get("status") != "admitted":
         return admitted

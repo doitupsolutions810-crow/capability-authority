@@ -10,7 +10,7 @@ class Intent:
     caller: str = None
 
 class PlaneClient:
-    def __init__(self, base="http://127.0.0.1:8090"):
+    def __init__(self, base="http://127.0.0.1:8095"):
         self.base = base.rstrip("/")
     def _post(self, path, body):
         req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(), headers={"content-type": "application/json"})

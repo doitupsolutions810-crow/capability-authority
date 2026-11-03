@@ -14,7 +14,7 @@ cd capability-authority
 pip install -r requirements-lab.txt
 export PYTHONPATH=$PWD
 make test
-python3 -m plane_service.server          # :8090
+python3 -m plane_service.server          # :8095
 ```
 
 ## CI

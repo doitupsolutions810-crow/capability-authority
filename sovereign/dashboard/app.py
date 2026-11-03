@@ -3,7 +3,7 @@ from flask import Flask, jsonify, request
 import json, os, urllib.request
 
 app = Flask(__name__)
-PLANE = os.environ.get("PLANE_URL", "http://127.0.0.1:8090")
+PLANE = os.environ.get("PLANE_URL", "http://127.0.0.1:8095")
 
 @app.get("/health")
 def health():
