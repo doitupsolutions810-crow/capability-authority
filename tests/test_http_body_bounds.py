@@ -38,3 +38,18 @@ def test_rejects_malformed_json_and_non_object_body(authority_http):
 def test_unknown_post_route_returns_404_without_parsing_body(authority_http):
     response = httpx.post(authority_http + "/not-a-route", content=b"not json")
     assert response.status_code == 404
+
+
+def test_rejects_duplicate_keys_and_nonfinite_json(authority_http):
+    duplicate = httpx.post(
+        authority_http + "/v1/capabilities/delegate",
+        content=b'{"audience":"spiffe://prod/agent/swarm","audience":"spiffe://prod/agent/attacker"}',
+        headers={"content-type": "application/json"},
+    )
+    nonfinite = httpx.post(
+        authority_http + "/v1/capabilities/delegate",
+        content=b'{"ttl_seconds":NaN}',
+        headers={"content-type": "application/json"},
+    )
+    assert duplicate.status_code == 400
+    assert nonfinite.status_code == 400
