@@ -80,7 +80,7 @@ def test_delegate_issues_attenuated_child_and_persists_before_return(delegation_
     assert child["audience"] == SWARM
     assert child["parent_id"] == "parent-001"
     assert child["rights"] == [RIGHT]
-    assert child["constraints"] == {"tenant": "test-tenant"}
+    assert child["constraints"] == {"tenant": "test-tenant", "delegation_audiences": [SWARM]}
     assert child["expires_at"] <= parent_expiry
     assert result["signature"] == "child-signature"
     assert len(index.rows) == 1
