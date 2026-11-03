@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import math
 import re
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 from typing import Any
 
@@ -48,11 +49,27 @@ def _utc(value: Any) -> datetime:
 
 
 def _is_spiffe_id(value: Any) -> bool:
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 512
+        or any(ord(char) < 0x21 or ord(char) == 0x7f for char in value)
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    trust_domain = parsed.netloc
     return (
-        isinstance(value, str)
-        and 1 <= len(value) <= 512
-        and value.startswith("spiffe://")
-        and not any(ord(char) < 0x21 or ord(char) == 0x7f for char in value)
+        parsed.scheme == "spiffe"
+        and bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", trust_domain))
+        and ":" not in trust_domain
+        and parsed.path.startswith("/")
+        and len(parsed.path) > 1
+        and not parsed.query
+        and not parsed.fragment
+        and parsed.username is None
+        and parsed.password is None
     )
 
 
@@ -99,7 +116,10 @@ def verify_requester_assertion(
     current = now if now is not None else datetime.now(timezone.utc)
     if not isinstance(current, datetime) or current.tzinfo is None or current.utcoffset() is None:
         raise DelegationError("verification clock must be timezone-aware")
-    current_ts = current.timestamp()
+    try:
+        current_ts = current.timestamp()
+    except (OverflowError, OSError, ValueError) as exc:
+        raise DelegationError("verification clock is outside supported range") from exc
     if not math.isfinite(current_ts):
         raise DelegationError("verification clock must be finite")
     if issued.timestamp() > current_ts + clock_skew_seconds:
