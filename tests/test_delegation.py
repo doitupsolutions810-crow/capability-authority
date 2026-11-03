@@ -45,7 +45,7 @@ def parent_for(now_ts, **overrides):
         "issuer": BROKER,
         "audience": REQUESTER,
         "rights": [RIGHT, {"type": "read", "resource": "demo", "method": "GET"}],
-        "constraints": {"tenant": "test-tenant"},
+        "constraints": {"tenant": "test-tenant", "delegation_audiences": [SWARM]},
         "issued_at": now_ts - 10,
         "expires_at": now_ts + 30,
         "delegation_depth": 0,
