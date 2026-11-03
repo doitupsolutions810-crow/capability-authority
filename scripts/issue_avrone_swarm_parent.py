@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import uuid
 from pathlib import Path
 
@@ -24,7 +25,11 @@ RIGHTS = [{"type": "Execute", "resource": "swarm.jobs", "method": "POST"}]
 
 
 def write_private_atomic(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.is_symlink():
+        raise RuntimeError("parent-capability output must not be a symlink")
+    if stat.S_IMODE(path.parent.stat().st_mode) & 0o077:
+        raise RuntimeError("parent-capability directory must have mode 0700 or stricter")
     if path.exists():
         try:
             existing_bytes = path.read_bytes()
@@ -33,6 +38,7 @@ def write_private_atomic(path: Path, data: bytes) -> None:
             raise RuntimeError("existing parent-capability file is not valid JSON; refusing overwrite") from exc
         if not isinstance(existing, dict) or existing_bytes != data:
             raise RuntimeError("existing parent-capability file differs; refusing overwrite")
+        os.chmod(path, 0o600)
         return
     temp = path.with_name("." + path.name + "." + uuid.uuid4().hex + ".tmp")
     fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
