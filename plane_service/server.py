@@ -398,17 +398,36 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        n = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(n) if n else b"{}"
+        if path not in ROUTES:
+            self._json(404, {"status": "error", "error": "unknown path"})
+            return
         try:
-            body = json.loads(raw.decode() or "{}")
-            fn = ROUTES.get(path)
-            if not fn:
-                self._json(404, {"status": "error", "error": "unknown path"})
-                return
-            self._json(200, fn(body))
-        except Exception as e:
-            self._json(500, {"status": "error", "error": str(e)})
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            return
+        if n < 0:
+            self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            return
+        if n > 65536:
+            self._json(413, {"status": "error", "error": "request body exceeds 64 KiB"})
+            return
+        raw = self.rfile.read(n) if n else b"{}"
+        if len(raw) != n:
+            self._json(400, {"status": "error", "error": "incomplete request body"})
+            return
+        try:
+            body = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            self._json(400, {"status": "error", "error": "malformed JSON request body"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"status": "error", "error": "request body must be a JSON object"})
+            return
+        try:
+            self._json(200, ROUTES[path](body))
+        except Exception:
+            self._json(500, {"status": "error", "error": "internal server error"})
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
