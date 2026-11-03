@@ -1,5 +1,6 @@
 """Ed25519 signing. Requires cryptography."""
-import base64, json, os
+import base64, os
+import rfc8785
 from pathlib import Path
 from typing import Optional
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -9,7 +10,8 @@ _KEY = None
 _PUB = None
 
 def canonical(obj):
-    return json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
+    """RFC 8785 JSON Canonicalization Scheme shared with Node.js adapters."""
+    return rfc8785.dumps(obj)
 
 def _load():
     global _KEY, _PUB
