@@ -153,3 +153,145 @@ def test_rejects_audience_not_scoped_by_parent_even_if_globally_allowlisted():
     parent = parent_for(now, constraints={"tenant": "test-tenant", "delegation_audiences": []})
     with pytest.raises(DelegationError, match="parent constraints"):
         validate_delegation(parent, requester=REQUESTER, audience=SWARM, rights=[RIGHT], ttl_seconds=30, allowed_audiences={SWARM}, now_ts=now)
+
+
+@pytest.mark.parametrize("bad_jti", ["", " ", "bad\njti", "tab\tjti", "nul\x00jti", "x" * 129, "☃"])
+def test_rejects_unsafe_or_oversized_assertion_ids(keys, bad_jti):
+    private, public = keys
+    now = datetime.now(timezone.utc)
+    assertion = assertion_for(private, now, jti=bad_jti)
+    with pytest.raises(DelegationError):
+        verify_requester_assertion(
+            assertion, public, expected_issuer=REQUESTER,
+            expected_audience=BROKER, now=now,
+        )
+
+
+def test_assertion_expiry_is_strict_at_the_exact_boundary(keys):
+    private, public = keys
+    now = datetime.now(timezone.utc)
+    assertion = assertion_for(
+        private, now,
+        expires_at=now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    )
+    with pytest.raises(DelegationError, match="expired"):
+        verify_requester_assertion(
+            assertion, public, expected_issuer=REQUESTER,
+            expected_audience=BROKER, now=now,
+        )
+
+
+@pytest.mark.parametrize("skew", [True, -1, 121, "30", 1.5])
+def test_rejects_invalid_clock_skew_configuration(keys, skew):
+    private, public = keys
+    now = datetime.now(timezone.utc)
+    assertion = assertion_for(private, now)
+    with pytest.raises(DelegationError, match="clock skew"):
+        verify_requester_assertion(
+            assertion, public, expected_issuer=REQUESTER,
+            expected_audience=BROKER, now=now, clock_skew_seconds=skew,
+        )
+
+
+@pytest.mark.parametrize("lifetime", [True, 0, 61, -1, "60"])
+def test_rejects_invalid_assertion_lifetime_configuration(keys, lifetime):
+    private, public = keys
+    now = datetime.now(timezone.utc)
+    assertion = assertion_for(private, now)
+    with pytest.raises(DelegationError, match="maximum lifetime"):
+        verify_requester_assertion(
+            assertion, public, expected_issuer=REQUESTER,
+            expected_audience=BROKER, now=now, max_lifetime_seconds=lifetime,
+        )
+
+
+@pytest.mark.parametrize("bad_now", [float("nan"), float("inf"), -float("inf"), True, "1000", None])
+def test_rejects_invalid_delegation_clock(bad_now):
+    now = 1000.0
+    with pytest.raises(DelegationError, match="clock"):
+        validate_delegation(
+            parent_for(now), requester=REQUESTER, audience=SWARM,
+            rights=[RIGHT], ttl_seconds=10, allowed_audiences={SWARM},
+            now_ts=bad_now,
+        )
+
+
+@pytest.mark.parametrize("bad_depth", [True, -1, 1.5, "0", None])
+def test_rejects_invalid_parent_delegation_depth(bad_depth):
+    now = datetime.now(timezone.utc).timestamp()
+    with pytest.raises(DelegationError, match="depth"):
+        validate_delegation(
+            parent_for(now, delegation_depth=bad_depth), requester=REQUESTER,
+            audience=SWARM, rights=[RIGHT], ttl_seconds=10,
+            allowed_audiences={SWARM}, now_ts=now,
+        )
+
+
+@pytest.mark.parametrize("bad_parent_right", [
+    {"type": [], "resource": "swarm.jobs", "method": "POST"},
+    {"type": "Execute", "resource": {}, "method": "POST"},
+    {"type": "Execute", "resource": "swarm.jobs", "method": []},
+])
+def test_malformed_parent_rights_never_crash_or_grant(bad_parent_right):
+    now = datetime.now(timezone.utc).timestamp()
+    with pytest.raises(DelegationError, match="exceed parent"):
+        validate_delegation(
+            parent_for(now, rights=[bad_parent_right]), requester=REQUESTER,
+            audience=SWARM, rights=[RIGHT], ttl_seconds=10,
+            allowed_audiences={SWARM}, now_ts=now,
+        )
+
+
+@pytest.mark.parametrize("bad_now", [float("nan"), float("inf"), -float("inf"), True, "1"])
+def test_rejects_invalid_parent_clock_values(bad_now):
+    now = datetime.now(timezone.utc).timestamp()
+    with pytest.raises(DelegationError):
+        validate_delegation(
+            parent_for(now), requester=REQUESTER, audience=SWARM,
+            rights=[RIGHT], ttl_seconds=10, allowed_audiences={SWARM},
+            now_ts=now, max_ttl_seconds=bad_now,
+        )
+
+
+@pytest.mark.parametrize("bad_allowlist", [None, set(), ["not-a-spiffe-id"], {1}, "spiffe://prod/agent/swarm"])
+def test_rejects_malformed_audience_allowlists(bad_allowlist):
+    now = datetime.now(timezone.utc).timestamp()
+    with pytest.raises(DelegationError, match="allowlist"):
+        validate_delegation(
+            parent_for(now), requester=REQUESTER, audience=SWARM,
+            rights=[RIGHT], ttl_seconds=10, allowed_audiences=bad_allowlist,
+            now_ts=now,
+        )
+
+
+def test_rejects_malformed_delegated_audience_scope():
+    now = datetime.now(timezone.utc).timestamp()
+    for scope in ([SWARM, 1], "spiffe://prod/agent/swarm", [None]):
+        with pytest.raises(DelegationError, match="parent constraints"):
+            validate_delegation(
+                parent_for(now, constraints={"delegation_audiences": scope}),
+                requester=REQUESTER, audience=SWARM, rights=[RIGHT],
+                ttl_seconds=10, allowed_audiences={SWARM}, now_ts=now,
+            )
+
+
+def test_rejects_naive_verification_clock(keys):
+    private, public = keys
+    now = datetime.now(timezone.utc)
+    assertion = assertion_for(private, now)
+    with pytest.raises(DelegationError, match="timezone-aware"):
+        verify_requester_assertion(
+            assertion, public, expected_issuer=REQUESTER,
+            expected_audience=BROKER, now=datetime.now(),
+        )
+
+
+def test_rejects_oversized_pinned_public_key(keys):
+    private, _ = keys
+    now = datetime.now(timezone.utc)
+    assertion = assertion_for(private, now)
+    with pytest.raises(DelegationError, match="oversized"):
+        verify_requester_assertion(
+            assertion, b"x" * (16 * 1024 + 1), expected_issuer=REQUESTER,
+            expected_audience=BROKER, now=now,
+        )
