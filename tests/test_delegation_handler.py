@@ -257,3 +257,25 @@ def test_expired_assertion_cannot_replay_same_correlation_with_changed_request(d
     assert conflict["status"] == "error"
     assert conflict["error"] == "delegation_correlation_replay_conflict"
     assert len(index.rows) == 1
+
+
+def test_expired_assertion_with_tampered_signature_cannot_retrieve_prior_result(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    original_now = server.time.time()
+    first = server.handle_delegate(request)
+    assert first["status"] == "ok"
+    real_datetime = delegation.datetime
+    class ExpiredDateTime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime.fromtimestamp(original_now + 35, tz=tz)
+    monkeypatch.setattr(delegation, "datetime", ExpiredDateTime)
+    monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
+    tampered = {**request, "requester_assertion": dict(request["requester_assertion"])}
+    signature = tampered["requester_assertion"]["signature"]
+    tampered["requester_assertion"]["signature"] = ("A" if signature[0] != "A" else "B") + signature[1:]
+    result = server.handle_delegate(tampered)
+    assert result["status"] == "error"
+    assert "signature" in result["error"]
+    assert len(index.rows) == 1
