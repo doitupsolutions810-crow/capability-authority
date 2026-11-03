@@ -1,5 +1,8 @@
 import base64
+import hashlib
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -18,12 +21,25 @@ RIGHT = {"type": "Execute", "resource": "swarm.jobs", "method": "POST"}
 class MemoryIndex:
     def __init__(self):
         self.rows = []
+        self.lock = threading.Lock()
 
     def query(self, **filters):
-        return [
-            row for row in self.rows
-            if all(row.get(key) == value for key, value in filters.items() if value is not None)
-        ]
+        with self.lock:
+            return [
+                dict(row) for row in self.rows
+                if all(row.get(key) == value for key, value in filters.items() if value is not None)
+            ]
+
+    def append_event(self, event):
+        with self.lock:
+            event_id = event.get("event_id")
+            existing = next((row for row in self.rows if row.get("event_id") == event_id), None)
+            if existing is not None:
+                if existing != event:
+                    raise ValueError("event_id was already committed with a different payload")
+                return {"durable": True, "idempotent_replay": True}
+            self.rows.append(dict(event))
+            return {"durable": True}
 
 
 @pytest.fixture
@@ -39,7 +55,7 @@ def delegation_env(monkeypatch, tmp_path):
     index = MemoryIndex()
     import evidence.index as evidence_index
     monkeypatch.setattr(evidence_index, "get_index", lambda: index)
-    monkeypatch.setattr(server, "_record_evidence", lambda event: index.rows.append(dict(event)) or {"durable": True})
+    monkeypatch.setattr(server, "_record_evidence", index.append_event)
     monkeypatch.setattr(server, "verify_sig", lambda cap, signature: signature == "parent-signature")
     monkeypatch.setattr(server, "sign", lambda cap: "child-signature")
     return requester_key, index
@@ -96,6 +112,29 @@ def test_delegate_is_idempotent_for_same_correlation_and_request(delegation_env)
     assert first["capability"] == second["capability"]
     assert first["signature"] == second["signature"]
     assert second["idempotent_replay"] is True
+    assert len(index.rows) == 1
+
+
+def test_concurrent_same_correlation_returns_one_durable_child(delegation_env):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(server.handle_delegate, [request, request]))
+    assert all(result["status"] == "ok" for result in results)
+    assert results[0]["capability"] == results[1]["capability"]
+    assert sum(result.get("idempotent_replay") is False for result in results) == 1
+    assert len(index.rows) == 1
+
+
+def test_concurrent_reuse_of_one_assertion_across_correlations_is_rejected(delegation_env):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    other = {**request, "correlation_id": "corr-handler-other"}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(server.handle_delegate, [request, other]))
+    assert sum(result["status"] == "ok" for result in results) == 1
+    rejected = next(result for result in results if result["status"] == "error")
+    assert "replay" in rejected["error"]
     assert len(index.rows) == 1
 
 
@@ -183,7 +222,7 @@ def test_delegation_evidence_has_stable_correlation_event_id(delegation_env):
     request = make_request(requester_key)
     result = server.handle_delegate(request)
     assert result["status"] == "ok"
-    expected = "delegation:" + hashlib.sha256(request["correlation_id"].encode("ascii")).hexdigest()
+    expected = "delegation:" + hashlib.sha256(request["requester_assertion"]["jti"].encode("ascii")).hexdigest()
     assert index.rows[0]["event_id"] == expected
 
 
