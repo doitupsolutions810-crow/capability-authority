@@ -217,7 +217,7 @@ def test_http_json_constant_parser_rejects_nan_and_infinity():
             server._reject_json_constant(value)
 
 
-def test_delegation_evidence_has_stable_correlation_event_id(delegation_env):
+def test_delegation_evidence_has_stable_assertion_event_id(delegation_env):
     requester_key, index = delegation_env
     request = make_request(requester_key)
     result = server.handle_delegate(request)
