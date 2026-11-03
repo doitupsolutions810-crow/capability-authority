@@ -7,6 +7,10 @@ import json
 import uuid
 import os
 import sys
+import time
+import stat
+import math
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,6 +26,7 @@ from plane_service.crypto_sign import canonical, public_key_b64, sign, verify_si
 from plane_service.executor import Executor
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
+from plane_service.delegation import DelegationError, verify_requester_assertion, validate_delegation
 from plane_service.spiffe_identity import fetch_workload_identity
 
 TRUST_DOMAIN = os.environ.get("PLANE_TRUST_DOMAIN", "prod")
@@ -148,6 +153,168 @@ def handle_issue(body: dict) -> dict:
         "broker_public_key_b64": public_key_b64(),
         "_identity_source": body.get("_identity_source"),
     }
+
+
+def handle_delegate(body: dict) -> dict:
+    """Issue an attenuated child capability to an allowlisted workload audience."""
+    if not isinstance(body, dict):
+        return {"status": "error", "error": "delegation request must be an object"}
+    requester = os.environ.get("PLANE_DELEGATION_REQUESTER_ID", "")
+    key_file = os.environ.get("PLANE_DELEGATION_REQUESTER_PUBLIC_KEY_FILE", "")
+    if not requester or not key_file:
+        return {"status": "error", "error": "pinned delegation requester identity and public key are not configured"}
+    try:
+        key_fd = os.open(key_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        try:
+            key_stat = os.fstat(key_fd)
+            if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_size > 16 * 1024:
+                raise OSError("pinned requester public key must be a bounded regular file")
+            with os.fdopen(key_fd, "rb") as key_stream:
+                key_fd = -1
+                requester_public_key = key_stream.read(16 * 1024 + 1)
+            if len(requester_public_key) > 16 * 1024:
+                raise OSError("pinned requester public key is oversized")
+        finally:
+            if key_fd >= 0:
+                os.close(key_fd)
+        assertion = body.get("requester_assertion")
+        # Authenticate identity and signature before reconciliation, but defer
+        # expiry enforcement until after exact prior-request lookup. This allows
+        # only an idempotent read of an existing result after assertion expiry.
+        jti = verify_requester_assertion(
+            assertion, requester_public_key, expected_issuer=requester,
+            expected_audience=ISSUER, allow_expired_for_replay=True,
+        )
+    except (OSError, DelegationError) as exc:
+        return {"status": "error", "error": str(exc)}
+    parent = body.get("parent_capability")
+    parent_signature = body.get("parent_signature", "")
+    if not verify_sig(parent, parent_signature):
+        return {"status": "error", "error": "invalid parent capability signature"}
+    if parent.get("issuer") != ISSUER:
+        return {"status": "error", "error": "parent capability issuer mismatch"}
+    if parent.get("audience") != requester:
+        return {"status": "error", "error": "parent capability audience must match authenticated requester"}
+    audience, rights = body.get("audience"), body.get("rights")
+    requested_ttl = body.get("ttl_seconds", 120)
+    correlation_id = body.get("correlation_id")
+    if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
+        return {"status": "error", "error": "correlation_id is required (1..128 characters)"}
+    allowed_audiences = {item.strip() for item in os.environ.get("PLANE_DELEGATION_ALLOWED_AUDIENCES", "").split(",") if item.strip()}
+    if not allowed_audiences:
+        return {"status": "error", "error": "delegation audience allowlist is not configured"}
+    # Reconcile an already-issued correlation before checking parent expiry.
+    # A caller retrying after a lost response must receive the exact same child.
+    if not isinstance(audience, str) or audience not in allowed_audiences:
+        return {"status": "error", "error": "delegated audience is not allowlisted"}
+    parent_constraints = parent.get("constraints")
+    parent_scope = parent_constraints.get("delegation_audiences") if isinstance(parent_constraints, dict) else None
+    if not isinstance(parent_scope, list) or not all(isinstance(item, str) for item in parent_scope) or audience not in parent_scope:
+        return {"status": "error", "error": "delegated audience is not authorized by parent constraints"}
+    try:
+        parent_digest = hashlib.sha256(canonical(parent)).hexdigest()
+        request_digest = "sha256:" + hashlib.sha256(canonical({
+            "parent_capability_digest": parent_digest, "audience": audience,
+            "rights": rights, "ttl_seconds": requested_ttl, "requester": requester,
+            # A correlation is idempotent only for the exact same signed requester
+            # assertion identity. Otherwise a fresh JTI could receive the prior
+            # child without being durably recorded under its own event_id.
+            "requester_assertion_jti": jti,
+            "requester_assertion_digest": "sha256:" + hashlib.sha256(canonical(assertion)).hexdigest(),
+        })).hexdigest()
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return {"status": "error", "error": "delegation request is not canonical finite JSON"}
+    from evidence.index import get_index
+    index = get_index()
+    prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
+    if prior:
+        row = prior[0]
+        if row.get("request_digest") != request_digest:
+            return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+        if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
+            return {"status": "error", "error": "prior delegation evidence is incomplete"}
+        prior_child = row["capability"]
+        prior_expiry = prior_child.get("expires_at")
+        if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
+            return {"status": "error", "error": "prior delegated capability expiry is invalid"}
+        if prior_expiry <= time.time():
+            return {
+                "status": "error", "error": "delegated_capability_expired",
+                "message_id": row.get("message_id"), "correlation_id": correlation_id,
+                "capability_id": prior_child.get("id"), "idempotent_replay": True,
+            }
+        return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
+    # No prior result exists. An expired assertion must never authorize a
+    # first issuance, even when its signature and identity remain authentic.
+    try:
+        verify_requester_assertion(
+            assertion, requester_public_key, expected_issuer=requester,
+            expected_audience=ISSUER,
+        )
+    except DelegationError as exc:
+        return {"status": "error", "error": str(exc)}
+    if check_bounds(parent, acceptance):
+        return {"status": "error", "error": "parent capability bounds rejected"}
+    try:
+        ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=time.time(), max_delegation_depth=int(acceptance.get("max_delegation_depth") or 3))
+        parent_depth = parent.get("delegation_depth", 0)
+        constraints = parent.get("constraints")
+        if not isinstance(constraints, dict):
+            raise DelegationError("parent constraints must be an object")
+        policy.authorize(audience, rights, constraints, ttl)
+    except (DelegationError, PolicyError, TypeError, ValueError) as exc:
+        return {"status": "error", "error": str(exc)}
+    reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
+    if reused:
+        return {"status": "error", "error": "requester assertion replay detected"}
+    child = issue(caller=audience, issuer=ISSUER, rights=rights, constraints=constraints, ttl_seconds=ttl, trust_domain=TRUST_DOMAIN, broker_measurement=BROKER_MEASUREMENT, policy_version=POLICY_VERSION)
+    child["parent_id"] = parent["id"]
+    child["delegation_depth"] = parent_depth + 1
+    child_signature = sign(child)
+    # The requester assertion JTI is the globally unique issuance identity.
+    # Using only correlation_id here would allow the same signed assertion to
+    # race under two correlations and mint two children before either query sees
+    # the other's evidence. The warehouse's unique event_id index fences that.
+    event_id = "delegation:" + hashlib.sha256(jti.encode("ascii")).hexdigest()
+    event = {
+        "event_id": event_id,
+        "message_type": "CapabilityDelegated", "message_id": jti, "correlation_id": correlation_id,
+        "request_digest": request_digest, "requester": requester, "audience": audience,
+        "parent_capability_id": parent["id"], "capability_id": child["id"],
+        "capability": child, "signature": child_signature,
+        "delegation_depth": child["delegation_depth"], "expires_at": child["expires_at"],
+    }
+    try:
+        _record_evidence(event)
+    except Exception:
+        # Resolve a concurrent writer only from durable evidence. A matching
+        # correlation returns the exact winning child; a reused JTI under a
+        # different correlation is rejected. Storage failures with no committed
+        # evidence still propagate and never return an unrecorded capability.
+        prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
+        if prior:
+            row = prior[0]
+            if row.get("request_digest") != request_digest:
+                return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+            if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
+                return {"status": "error", "error": "prior delegation evidence is incomplete"}
+            prior_child = row["capability"]
+            prior_expiry = prior_child.get("expires_at")
+            if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
+                return {"status": "error", "error": "prior delegated capability expiry is invalid"}
+            if prior_expiry <= time.time():
+                return {
+                    "status": "error", "error": "delegated_capability_expired",
+                    "message_id": row.get("message_id"), "correlation_id": correlation_id,
+                    "capability_id": prior_child.get("id"), "idempotent_replay": True,
+                }
+            return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id,
+                    "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
+        reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
+        if reused:
+            return {"status": "error", "error": "requester assertion replay detected"}
+        raise
+    return {"status": "ok", "message_id": jti, "correlation_id": correlation_id, "capability": child, "signature": child_signature, "idempotent_replay": False}
 
 
 def handle_attenuate(body: dict) -> dict:
@@ -297,6 +464,7 @@ def handle_agent_list(_body: dict) -> dict:
 
 ROUTES = {
     "/v1/capabilities/issue": handle_issue,
+    "/v1/capabilities/delegate": handle_delegate,
     "/v1/capabilities/attenuate": handle_attenuate,
     "/v1/capabilities/verify": handle_verify,
     "/v1/execute": handle_execute,
@@ -306,23 +474,62 @@ ROUTES = {
 }
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise ValueError("non-finite JSON constant is forbidden: " + value)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[broker+executor] {self.command} {self.path} " + (fmt % args))
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        n = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(n) if n else b"{}"
+        if path not in ROUTES:
+            self._json(404, {"status": "error", "error": "unknown path"})
+            return
+        if self.headers.get("Transfer-Encoding"):
+            self._json(501, {"status": "error", "error": "transfer-encoded request bodies are unsupported"})
+            return
         try:
-            body = json.loads(raw.decode() or "{}")
-            fn = ROUTES.get(path)
-            if not fn:
-                self._json(404, {"status": "error", "error": "unknown path"})
-                return
-            self._json(200, fn(body))
-        except Exception as e:
-            self._json(500, {"status": "error", "error": str(e)})
+            n = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError, OverflowError):
+            self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            return
+        if n < 0:
+            self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            return
+        if n > 65536:
+            self._json(413, {"status": "error", "error": "request body exceeds 64 KiB"})
+            return
+        raw = self.rfile.read(n) if n else b"{}"
+        if len(raw) != n:
+            self._json(400, {"status": "error", "error": "incomplete request body"})
+            return
+        try:
+            body = json.loads(
+                raw.decode("utf-8") or "{}",
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+            self._json(400, {"status": "error", "error": "malformed, duplicate-key, or non-finite JSON request body"})
+            return
+        if not isinstance(body, dict):
+            self._json(400, {"status": "error", "error": "request body must be a JSON object"})
+            return
+        try:
+            self._json(200, ROUTES[path](body))
+        except Exception:
+            self._json(500, {"status": "error", "error": "internal server error"})
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
