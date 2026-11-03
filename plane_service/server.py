@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import stat
+import math
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -222,7 +223,7 @@ def handle_delegate(body: dict) -> dict:
             return {"status": "error", "error": "prior delegation evidence is incomplete"}
         prior_child = row["capability"]
         prior_expiry = prior_child.get("expires_at")
-        if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not __import__("math").isfinite(prior_expiry):
+        if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
             return {"status": "error", "error": "prior delegated capability expiry is invalid"}
         if prior_expiry <= time.time():
             return {
