@@ -22,6 +22,7 @@ from plane_service.crypto_sign import canonical, public_key_b64, sign, verify_si
 from plane_service.executor import Executor
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
+from plane_service.delegation import DelegationError, verify_requester_assertion, validate_delegation
 from plane_service.spiffe_identity import fetch_workload_identity
 
 TRUST_DOMAIN = os.environ.get("PLANE_TRUST_DOMAIN", "prod")
@@ -148,6 +149,80 @@ def handle_issue(body: dict) -> dict:
         "broker_public_key_b64": public_key_b64(),
         "_identity_source": body.get("_identity_source"),
     }
+
+
+def handle_delegate(body: dict) -> dict:
+    """Issue an attenuated child capability to an allowlisted workload audience."""
+    if not isinstance(body, dict):
+        return {"status": "error", "error": "delegation request must be an object"}
+    requester = os.environ.get("PLANE_DELEGATION_REQUESTER_ID", "")
+    key_file = os.environ.get("PLANE_DELEGATION_REQUESTER_PUBLIC_KEY_FILE", "")
+    if not requester or not key_file:
+        return {"status": "error", "error": "pinned delegation requester identity and public key are not configured"}
+    try:
+        requester_public_key = Path(key_file).read_bytes()
+        assertion = body.get("requester_assertion")
+        jti = verify_requester_assertion(assertion, requester_public_key, expected_issuer=requester, expected_audience=ISSUER)
+    except (OSError, DelegationError) as exc:
+        return {"status": "error", "error": str(exc)}
+    parent = body.get("parent_capability")
+    parent_signature = body.get("parent_signature", "")
+    if not verify_sig(parent, parent_signature):
+        return {"status": "error", "error": "invalid parent capability signature"}
+    if parent.get("issuer") != ISSUER:
+        return {"status": "error", "error": "parent capability issuer mismatch"}
+    if check_bounds(parent, acceptance):
+        return {"status": "error", "error": "parent capability bounds rejected"}
+    if parent.get("audience") != requester:
+        return {"status": "error", "error": "parent capability audience must match authenticated requester"}
+    audience, rights = body.get("audience"), body.get("rights")
+    requested_ttl = body.get("ttl_seconds", 120)
+    correlation_id = body.get("correlation_id")
+    if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
+        return {"status": "error", "error": "correlation_id is required (1..128 characters)"}
+    allowed_audiences = {item.strip() for item in os.environ.get("PLANE_DELEGATION_ALLOWED_AUDIENCES", "").split(",") if item.strip()}
+    if not allowed_audiences:
+        return {"status": "error", "error": "delegation audience allowlist is not configured"}
+    try:
+        ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=__import__("time").time())
+        parent_depth = int(parent.get("delegation_depth") or 0)
+        if parent_depth + 1 > int(acceptance.get("max_delegation_depth") or 3):
+            raise DelegationError("maximum delegation depth exceeded")
+        constraints = parent.get("constraints")
+        if not isinstance(constraints, dict):
+            raise DelegationError("parent constraints must be an object")
+        policy.authorize(audience, rights, constraints, ttl)
+    except (DelegationError, PolicyError, TypeError, ValueError) as exc:
+        return {"status": "error", "error": str(exc)}
+    request_digest = "sha256:" + hashlib.sha256(canonical({
+        "parent_capability_id": parent.get("id"), "audience": audience,
+        "rights": rights, "ttl_seconds": requested_ttl, "requester": requester,
+    })).hexdigest()
+    from evidence.index import get_index
+    index = get_index()
+    prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
+    if prior:
+        row = prior[0]
+        if row.get("request_digest") != request_digest:
+            return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+        if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
+            return {"status": "error", "error": "prior delegation evidence is incomplete"}
+        return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": row["capability"], "signature": row["signature"], "idempotent_replay": True}
+    reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
+    if reused:
+        return {"status": "error", "error": "requester assertion replay detected"}
+    child = issue(caller=audience, issuer=ISSUER, rights=rights, constraints=constraints, ttl_seconds=ttl, trust_domain=TRUST_DOMAIN, broker_measurement=BROKER_MEASUREMENT, policy_version=POLICY_VERSION)
+    child["parent_id"] = parent["id"]
+    child["delegation_depth"] = parent_depth + 1
+    child_signature = sign(child)
+    _record_evidence({
+        "message_type": "CapabilityDelegated", "message_id": jti, "correlation_id": correlation_id,
+        "request_digest": request_digest, "requester": requester, "audience": audience,
+        "parent_capability_id": parent["id"], "capability_id": child["id"],
+        "capability": child, "signature": child_signature,
+        "delegation_depth": child["delegation_depth"], "expires_at": child["expires_at"],
+    })
+    return {"status": "ok", "message_id": jti, "correlation_id": correlation_id, "capability": child, "signature": child_signature, "idempotent_replay": False}
 
 
 def handle_attenuate(body: dict) -> dict:
@@ -297,6 +372,7 @@ def handle_agent_list(_body: dict) -> dict:
 
 ROUTES = {
     "/v1/capabilities/issue": handle_issue,
+    "/v1/capabilities/delegate": handle_delegate,
     "/v1/capabilities/attenuate": handle_attenuate,
     "/v1/capabilities/verify": handle_verify,
     "/v1/execute": handle_execute,
