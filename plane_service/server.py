@@ -8,6 +8,7 @@ import uuid
 import os
 import sys
 import time
+import stat
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -161,7 +162,19 @@ def handle_delegate(body: dict) -> dict:
     if not requester or not key_file:
         return {"status": "error", "error": "pinned delegation requester identity and public key are not configured"}
     try:
-        requester_public_key = Path(key_file).read_bytes()
+        key_fd = os.open(key_file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        try:
+            key_stat = os.fstat(key_fd)
+            if not stat.S_ISREG(key_stat.st_mode) or key_stat.st_size > 16 * 1024:
+                raise OSError("pinned requester public key must be a bounded regular file")
+            with os.fdopen(key_fd, "rb") as key_stream:
+                key_fd = -1
+                requester_public_key = key_stream.read(16 * 1024 + 1)
+            if len(requester_public_key) > 16 * 1024:
+                raise OSError("pinned requester public key is oversized")
+        finally:
+            if key_fd >= 0:
+                os.close(key_fd)
         assertion = body.get("requester_assertion")
         jti = verify_requester_assertion(assertion, requester_public_key, expected_issuer=requester, expected_audience=ISSUER)
     except (OSError, DelegationError) as exc:
@@ -187,7 +200,8 @@ def handle_delegate(body: dict) -> dict:
     if not isinstance(audience, str) or audience not in allowed_audiences:
         return {"status": "error", "error": "delegated audience is not allowlisted"}
     parent_constraints = parent.get("constraints")
-    if not isinstance(parent_constraints, dict) or audience not in (parent_constraints.get("delegation_audiences") or []):
+    parent_scope = parent_constraints.get("delegation_audiences") if isinstance(parent_constraints, dict) else None
+    if not isinstance(parent_scope, list) or not all(isinstance(item, str) for item in parent_scope) or audience not in parent_scope:
         return {"status": "error", "error": "delegated audience is not authorized by parent constraints"}
     try:
         parent_digest = hashlib.sha256(canonical(parent)).hexdigest()
