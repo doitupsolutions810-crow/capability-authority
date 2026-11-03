@@ -295,3 +295,19 @@ def test_rejects_oversized_pinned_public_key(keys):
             assertion, b"x" * (16 * 1024 + 1), expected_issuer=REQUESTER,
             expected_audience=BROKER, now=now,
         )
+
+
+@pytest.mark.parametrize("bad_identity", [
+    "spiffe://", "spiffe:///agent/swarm", "spiffe://prod",
+    "spiffe://user@prod/agent/swarm", "spiffe://prod:8080/agent/swarm",
+    "spiffe://prod/agent/swarm?debug=1", "spiffe://PROD/agent/swarm",
+    "spiffe://prod/agent/swarm#fragment",
+])
+def test_rejects_malformed_spiiffe_identity_authorities(bad_identity):
+    now = datetime.now(timezone.utc).timestamp()
+    with pytest.raises(DelegationError):
+        validate_delegation(
+            parent_for(now), requester=REQUESTER, audience=bad_identity,
+            rights=[RIGHT], ttl_seconds=10, allowed_audiences={bad_identity},
+            now_ts=now,
+        )
