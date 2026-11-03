@@ -130,3 +130,36 @@ def test_delegate_fails_closed_without_pinned_requester_key(monkeypatch, delegat
     result = server.handle_delegate(make_request(requester_key))
     assert result["status"] == "error"
     assert "not configured" in result["error"]
+
+
+def test_same_correlation_reconciles_after_parent_expiry(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    first = server.handle_delegate(request)
+    assert first["status"] == "ok"
+    expiry = request["parent_capability"]["expires_at"]
+    monkeypatch.setattr(server.time, "time", lambda: expiry + 1)
+    second = server.handle_delegate(request)
+    assert second["status"] == "ok"
+    assert second["idempotent_replay"] is True
+    assert second["capability"] == first["capability"]
+    assert len(index.rows) == 1
+
+
+def test_failed_durable_evidence_write_never_returns_capability(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    def fail(_event):
+        raise OSError("evidence volume unavailable")
+    monkeypatch.setattr(server, "_record_evidence", fail)
+    with pytest.raises(OSError, match="evidence volume unavailable"):
+        server.handle_delegate(make_request(requester_key))
+    assert index.rows == []
+
+
+def test_parent_with_malformed_delegation_scope_is_rejected(delegation_env):
+    requester_key, _index = delegation_env
+    request = make_request(requester_key)
+    request["parent_capability"]["constraints"]["delegation_audiences"] = "spiffe://prod/agent/swarm"
+    result = server.handle_delegate(request)
+    assert result["status"] == "error"
+    assert "parent constraints" in result["error"]
