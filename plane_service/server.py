@@ -6,12 +6,13 @@ import hashlib
 import json
 import uuid
 import os
+import socket
 import sys
 import time
 import stat
 import math
 import re
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -27,7 +28,20 @@ from plane_service.executor import Executor
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
 from plane_service.delegation import DelegationError, verify_requester_assertion, validate_delegation
+from plane_service.issuance_idempotency import (
+    IssuanceIdempotencyConflict,
+    IssuanceIdempotencyCorrupt,
+    IssuanceIdempotencyExpired,
+    IssuanceIdempotencyReplay,
+    IssuedAssertion,
+    get_issuance_store,
+)
 from plane_service.spiffe_identity import fetch_workload_identity
+
+# 8090 belongs to CycleKernal. This plane listens elsewhere unless PLANE_PORT is set.
+DEFAULT_PORT = 8095
+MAX_BODY_BYTES = 65536
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 
 TRUST_DOMAIN = os.environ.get("PLANE_TRUST_DOMAIN", "prod")
 POLICY_VERSION = int(os.environ.get("PLANE_POLICY_VERSION", "1"))
@@ -101,6 +115,71 @@ def _bus_publish(msg) -> None:
         _record_evidence({"message_type": type(msg).__name__, "raw": str(msg)})
 
 
+def _issue_fingerprint(caller: str, rights, constraints: dict, ttl: int) -> str:
+    digest = hashlib.sha256(canonical({
+        "operation": "issue",
+        "caller": caller,
+        "rights": rights,
+        "constraints": constraints,
+        "ttl_seconds": ttl,
+        "issuer": ISSUER,
+        "trust_domain": TRUST_DOMAIN,
+        "broker_measurement": BROKER_MEASUREMENT,
+        "policy_version": POLICY_VERSION,
+    })).hexdigest()
+    return "sha256:" + digest
+
+
+def _issue_jti(correlation_id: str) -> str:
+    return "issue-" + hashlib.sha256(correlation_id.encode("utf-8")).hexdigest()
+
+
+def _mint_issued_capability(caller, rights, constraints, ttl):
+    cap = issue(
+        caller=caller,
+        issuer=ISSUER,
+        rights=rights,
+        constraints=constraints,
+        ttl_seconds=ttl,
+        trust_domain=TRUST_DOMAIN,
+        broker_measurement=BROKER_MEASUREMENT,
+        policy_version=POLICY_VERSION,
+    )
+    encoded = canonical(cap)
+    stable = json.loads(encoded)
+    if not isinstance(stable, dict) or canonical(stable) != encoded:
+        raise RuntimeError("issued capability canonical form is unstable")
+    return stable, sign(stable)
+
+
+def _issue_response(body: dict, record, *, created: bool) -> dict:
+    _record_evidence(
+        {
+            "event_id": "issue:" + hashlib.sha256(record.correlation_id.encode("utf-8")).hexdigest(),
+            "message_type": "CapabilityIssued",
+            "message_id": record.assertion_jti,
+            "correlation_id": record.correlation_id,
+            "request_digest": record.fingerprint,
+            "capability_id": record.capability.get("id"),
+            "capability": record.capability,
+            "signature": record.signature,
+            "audience": record.capability.get("audience", ""),
+            "issuer": record.capability.get("issuer", ""),
+        }
+    )
+    return {
+        "status": "ok",
+        "message_id": record.assertion_jti,
+        "correlation_id": record.correlation_id,
+        "capability": record.capability,
+        "signature": record.signature,
+        "idempotent_replay": not created,
+        "platform": os.environ.get("PLANE_PLATFORM", "dev"),
+        "broker_public_key_b64": public_key_b64(),
+        "_identity_source": body.get("_identity_source"),
+    }
+
+
 def handle_issue(body: dict) -> dict:
     try:
         body = bind_issue_request(body)
@@ -114,12 +193,157 @@ def handle_issue(body: dict) -> dict:
         return {"status": "error", "error": "TTL must be an integer"}
     ttl = min(raw_ttl, 300)
     constraints = dict(body.get("constraints") or {})
+    supplied_correlation = "correlation_id" in body and body.get("correlation_id") is not None
+    correlation_id = body.get("correlation_id")
+    if supplied_correlation:
+        if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128 or "\x00" in correlation_id:
+            return {"status": "error", "error": "correlation_id must be a non-empty string up to 128 characters"}
+    else:
+        correlation_id = uuid.uuid4().hex
     try:
         policy.authorize(caller, rights, constraints, ttl)
     except PolicyError as e:
         return {"status": "error", "error": str(e)}
-    cap = issue(
-        caller=caller,
+    if not supplied_correlation:
+        cap, sig = _mint_issued_capability(caller, rights, constraints, ttl)
+        message_id = uuid.uuid4().hex
+        _record_evidence(
+            {
+                "event_id": "issue:" + hashlib.sha256(correlation_id.encode("utf-8")).hexdigest(),
+                "message_type": "CapabilityIssued",
+                "message_id": message_id,
+                "correlation_id": correlation_id,
+                "capability_id": cap.get("id"),
+                "capability": cap,
+                "signature": sig,
+                "audience": cap.get("audience", ""),
+                "issuer": cap.get("issuer", ""),
+            }
+        )
+        return {
+            "status": "ok",
+            "message_id": message_id,
+            "correlation_id": correlation_id,
+            "capability": cap,
+            "signature": sig,
+            "idempotent_replay": False,
+            "platform": os.environ.get("PLANE_PLATFORM", "dev"),
+            "broker_public_key_b64": public_key_b64(),
+            "_identity_source": body.get("_identity_source"),
+        }
+    fingerprint = _issue_fingerprint(caller, rights, constraints, ttl)
+    try:
+        record, created = get_issuance_store().commit_or_replay(
+            correlation_id=correlation_id,
+            fingerprint=fingerprint,
+            assertion_jti=_issue_jti(correlation_id),
+            now=time.time(),
+            mint=lambda: _mint_issued_capability(caller, rights, constraints, ttl),
+        )
+    except IssuanceIdempotencyConflict:
+        return {"status": "error", "error": "issue_correlation_replay_conflict"}
+    except IssuanceIdempotencyExpired as exc:
+        return {
+            "status": "error",
+            "error": "issued_capability_expired",
+            "correlation_id": correlation_id,
+            "capability_id": exc.record.capability.get("id"),
+            "idempotent_replay": True,
+        }
+    except (IssuanceIdempotencyReplay, IssuanceIdempotencyCorrupt):
+        return {"status": "error", "error": "issuance_idempotency_corrupt"}
+    return _issue_response(body, record, created=created)
+
+
+def _delegated_event_id(assertion_jti: str) -> str:
+    return "delegation:" + hashlib.sha256(assertion_jti.encode("ascii")).hexdigest()
+
+
+def _expired_delegation(record_id: str, message_id: str, correlation_id: str) -> dict:
+    return {
+        "status": "error",
+        "error": "delegated_capability_expired",
+        "message_id": message_id,
+        "correlation_id": correlation_id,
+        "capability_id": record_id,
+        "idempotent_replay": True,
+    }
+
+
+def _delegation_evidence_event(record: IssuedAssertion, *, requester: str, audience: str) -> dict:
+    child = record.capability
+    return {
+        "event_id": _delegated_event_id(record.assertion_jti),
+        "message_type": "CapabilityDelegated",
+        "message_id": record.assertion_jti,
+        "correlation_id": record.correlation_id,
+        "request_digest": record.fingerprint,
+        "requester": requester,
+        "audience": audience,
+        "parent_capability_id": child.get("parent_id"),
+        "capability_id": child.get("id"),
+        "capability": child,
+        "signature": record.signature,
+        "delegation_depth": child.get("delegation_depth"),
+        "expires_at": child.get("expires_at"),
+    }
+
+
+def _evidence_matches_issuance(row: dict, record: IssuedAssertion) -> bool:
+    capability = row.get("capability")
+    signature = row.get("signature")
+    if row.get("request_digest") != record.fingerprint:
+        return False
+    if not isinstance(capability, dict) or not isinstance(signature, str):
+        return False
+    if signature != record.signature:
+        return False
+    try:
+        return canonical(capability) == record.capability_canonical
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return False
+
+
+def _ok_delegation(record: IssuedAssertion, *, created: bool) -> dict:
+    return {
+        "status": "ok",
+        "message_id": record.assertion_jti,
+        "correlation_id": record.correlation_id,
+        "capability": record.capability,
+        "signature": record.signature,
+        "idempotent_replay": not created,
+    }
+
+
+def _publish_delegated(record: IssuedAssertion, *, created: bool, requester: str, audience: str) -> dict:
+    """Return the stored assertion only after durable evidence agrees with it."""
+    from evidence.index import get_index
+
+    index = get_index()
+    event = _delegation_evidence_event(record, requester=requester, audience=audience)
+    prior = index.query(message_type="CapabilityDelegated", correlation_id=record.correlation_id, limit=1)
+    if prior:
+        if not _evidence_matches_issuance(prior[0], record):
+            return {"status": "error", "error": "issuance_idempotency_corrupt"}
+        return _ok_delegation(record, created=False)
+    try:
+        _record_evidence(event)
+    except Exception:
+        prior = index.query(message_type="CapabilityDelegated", correlation_id=record.correlation_id, limit=1)
+        if prior:
+            if not _evidence_matches_issuance(prior[0], record):
+                return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+            return _ok_delegation(record, created=False)
+        reused = index.query(message_type="CapabilityDelegated", message_id=record.assertion_jti, limit=1)
+        if reused:
+            return {"status": "error", "error": "requester assertion replay detected"}
+        raise
+    return _ok_delegation(record, created=created)
+
+
+def _mint_delegated_child(audience, rights, constraints, ttl, parent, parent_depth):
+    child = issue(
+        caller=audience,
         issuer=ISSUER,
         rights=rights,
         constraints=constraints,
@@ -128,31 +352,13 @@ def handle_issue(body: dict) -> dict:
         broker_measurement=BROKER_MEASUREMENT,
         policy_version=POLICY_VERSION,
     )
-    sig = sign(cap)
-    correlation_id = body.get("correlation_id") or uuid.uuid4().hex
-    if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
-        return {"status": "error", "error": "correlation_id must be a non-empty string up to 128 characters"}
-    issue_message_id = uuid.uuid4().hex
-    _record_evidence(
-        {
-            "message_type": "CapabilityIssued",
-            "message_id": issue_message_id,
-            "correlation_id": correlation_id,
-            "capability_id": cap["id"],
-            "audience": cap.get("audience", ""),
-            "issuer": cap.get("issuer", ""),
-        }
-    )
-    return {
-        "status": "ok",
-        "message_id": issue_message_id,
-        "correlation_id": correlation_id,
-        "capability": cap,
-        "signature": sig,
-        "platform": os.environ.get("PLANE_PLATFORM", "dev"),
-        "broker_public_key_b64": public_key_b64(),
-        "_identity_source": body.get("_identity_source"),
-    }
+    child["parent_id"] = parent["id"]
+    child["delegation_depth"] = parent_depth + 1
+    encoded = canonical(child)
+    stable = json.loads(encoded)
+    if not isinstance(stable, dict) or canonical(stable) != encoded:
+        raise RuntimeError("delegated capability canonical form is unstable")
+    return stable, sign(stable)
 
 
 def handle_delegate(body: dict) -> dict:
@@ -221,6 +427,18 @@ def handle_delegate(body: dict) -> dict:
         return {"status": "error", "error": "delegation request is not canonical finite JSON"}
     from evidence.index import get_index
     index = get_index()
+    try:
+        existing = get_issuance_store().lookup(correlation_id)
+    except IssuanceIdempotencyCorrupt:
+        return {"status": "error", "error": "issuance_idempotency_corrupt"}
+    if existing is not None:
+        if existing.fingerprint != request_digest:
+            return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+        if existing.expires_at <= time.time():
+            return _expired_delegation(str(existing.capability.get("id")), existing.assertion_jti, correlation_id)
+        return _publish_delegated(existing, created=False, requester=requester, audience=audience)
+    # Evidence remains the audit log and the replay source for entries written
+    # before the idempotency ledger existed. It is not a second issuer.
     prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
     if prior:
         row = prior[0]
@@ -233,12 +451,11 @@ def handle_delegate(body: dict) -> dict:
         if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
             return {"status": "error", "error": "prior delegated capability expiry is invalid"}
         if prior_expiry <= time.time():
-            return {
-                "status": "error", "error": "delegated_capability_expired",
-                "message_id": row.get("message_id"), "correlation_id": correlation_id,
-                "capability_id": prior_child.get("id"), "idempotent_replay": True,
-            }
-        return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
+            return _expired_delegation(str(prior_child.get("id")), str(row.get("message_id")), correlation_id)
+        return {
+            "status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id,
+            "capability": prior_child, "signature": row["signature"], "idempotent_replay": True,
+        }
     # No prior result exists. An expired assertion must never authorize a
     # first issuance, even when its signature and identity remain authentic.
     try:
@@ -262,54 +479,23 @@ def handle_delegate(body: dict) -> dict:
     reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
     if reused:
         return {"status": "error", "error": "requester assertion replay detected"}
-    child = issue(caller=audience, issuer=ISSUER, rights=rights, constraints=constraints, ttl_seconds=ttl, trust_domain=TRUST_DOMAIN, broker_measurement=BROKER_MEASUREMENT, policy_version=POLICY_VERSION)
-    child["parent_id"] = parent["id"]
-    child["delegation_depth"] = parent_depth + 1
-    child_signature = sign(child)
-    # The requester assertion JTI is the globally unique issuance identity.
-    # Using only correlation_id here would allow the same signed assertion to
-    # race under two correlations and mint two children before either query sees
-    # the other's evidence. The warehouse's unique event_id index fences that.
-    event_id = "delegation:" + hashlib.sha256(jti.encode("ascii")).hexdigest()
-    event = {
-        "event_id": event_id,
-        "message_type": "CapabilityDelegated", "message_id": jti, "correlation_id": correlation_id,
-        "request_digest": request_digest, "requester": requester, "audience": audience,
-        "parent_capability_id": parent["id"], "capability_id": child["id"],
-        "capability": child, "signature": child_signature,
-        "delegation_depth": child["delegation_depth"], "expires_at": child["expires_at"],
-    }
     try:
-        _record_evidence(event)
-    except Exception:
-        # Resolve a concurrent writer only from durable evidence. A matching
-        # correlation returns the exact winning child; a reused JTI under a
-        # different correlation is rejected. Storage failures with no committed
-        # evidence still propagate and never return an unrecorded capability.
-        prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
-        if prior:
-            row = prior[0]
-            if row.get("request_digest") != request_digest:
-                return {"status": "error", "error": "delegation_correlation_replay_conflict"}
-            if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
-                return {"status": "error", "error": "prior delegation evidence is incomplete"}
-            prior_child = row["capability"]
-            prior_expiry = prior_child.get("expires_at")
-            if isinstance(prior_expiry, bool) or not isinstance(prior_expiry, (int, float)) or not math.isfinite(prior_expiry):
-                return {"status": "error", "error": "prior delegated capability expiry is invalid"}
-            if prior_expiry <= time.time():
-                return {
-                    "status": "error", "error": "delegated_capability_expired",
-                    "message_id": row.get("message_id"), "correlation_id": correlation_id,
-                    "capability_id": prior_child.get("id"), "idempotent_replay": True,
-                }
-            return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id,
-                    "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
-        reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
-        if reused:
-            return {"status": "error", "error": "requester assertion replay detected"}
-        raise
-    return {"status": "ok", "message_id": jti, "correlation_id": correlation_id, "capability": child, "signature": child_signature, "idempotent_replay": False}
+        record, created = get_issuance_store().commit_or_replay(
+            correlation_id=correlation_id,
+            fingerprint=request_digest,
+            assertion_jti=jti,
+            now=time.time(),
+            mint=lambda: _mint_delegated_child(audience, rights, constraints, ttl, parent, parent_depth),
+        )
+    except IssuanceIdempotencyConflict:
+        return {"status": "error", "error": "delegation_correlation_replay_conflict"}
+    except IssuanceIdempotencyExpired as exc:
+        return _expired_delegation(str(exc.record.capability.get("id")), exc.record.assertion_jti, correlation_id)
+    except IssuanceIdempotencyReplay:
+        return {"status": "error", "error": "requester assertion replay detected"}
+    except IssuanceIdempotencyCorrupt:
+        return {"status": "error", "error": "issuance_idempotency_corrupt"}
+    return _publish_delegated(record, created=created, requester=requester, audience=str(audience))
 
 
 def handle_attenuate(body: dict) -> dict:
@@ -354,9 +540,6 @@ def handle_execute(body: dict) -> dict:
         return {"status": "error", "error": "invalid signature"}
     if check_bounds(cap, acceptance):
         return {"status": "error", "error": "capability bounds rejected"}
-    if not verify(cap, required, caller):
-        return {"status": "error", "error": "verify failed"}
-
 
     from evidence.index import get_index
     index = get_index()
@@ -366,12 +549,21 @@ def handle_execute(body: dict) -> dict:
         limit=1,
     )
     action = f"{required.get('type')}:{required.get('resource')}:{required.get('method')}"
-    payload_bytes = canonical({"required": required, "input": action_input})
+    try:
+        payload_bytes = canonical({"required": required, "input": action_input})
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return {"status": "error", "error": "execution request is not canonical finite JSON"}
     payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
     if prior:
         prior_receipt = prior[0].get("receipt") or {}
         if (prior_receipt.get("action") != action or prior_receipt.get("capability_id") != cap.get("id") or prior_receipt.get("payload_digest") != payload_digest):
             return {"status": "error", "error": "correlation_id_replay_conflict"}
+    # A different method on an existing correlation is a replay conflict, not a
+    # fresh authorization miss. Matching replays still require a valid capability.
+    if not verify(cap, required, caller):
+        return {"status": "error", "error": "verify failed"}
+    if prior:
+        prior_receipt = prior[0].get("receipt") or {}
         executed = prior_receipt.get("outcome") == "succeeded"
         return {
             "status": "executed" if executed else "authorized",
@@ -401,6 +593,8 @@ def handle_execute(body: dict) -> dict:
         payload_digest=payload_digest,
         previous_receipt_digest=previous_receipt_digest,
     )
+    if result.get("idempotent_replay"):
+        return result
     if result.get("status") in ("authorized", "executed"):
         receipt = result.get("receipt") or {}
         _record_evidence(
@@ -483,6 +677,9 @@ def _reject_json_constant(value):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # Bound stalled clients so one unread body cannot hold a worker forever.
+    timeout = DEFAULT_REQUEST_TIMEOUT_SECONDS
+
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[broker+executor] {self.command} {self.path} " + (fmt % args))
 
@@ -494,29 +691,53 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding"):
             self._json(501, {"status": "error", "error": "transfer-encoded request bodies are unsupported"})
             return
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except (TypeError, ValueError, OverflowError):
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or raw_length == "":
+            n = 0
+        elif len(raw_length) > 10 or not raw_length.isdigit():
             self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            self.close_connection = True
             return
+        else:
+            try:
+                n = int(raw_length)
+            except (TypeError, ValueError, OverflowError):
+                self._json(400, {"status": "error", "error": "invalid Content-Length"})
+                self.close_connection = True
+                return
         if n < 0:
             self._json(400, {"status": "error", "error": "invalid Content-Length"})
+            self.close_connection = True
             return
-        if n > 65536:
+        if n > MAX_BODY_BYTES:
             self._json(413, {"status": "error", "error": "request body exceeds 64 KiB"})
-            return
-        raw = self.rfile.read(n) if n else b"{}"
-        if len(raw) != n:
-            self._json(400, {"status": "error", "error": "incomplete request body"})
+            self.close_connection = True
             return
         try:
+            raw = self.rfile.read(n) if n else b"{}"
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+            try:
+                self._json(408, {"status": "error", "error": "request body read timed out"})
+            except Exception:
+                pass
+            return
+        if len(raw) != n:
+            self._json(400, {"status": "error", "error": "incomplete request body"})
+            self.close_connection = True
+            return
+        try:
+            decoded = raw.decode("utf-8")
             body = json.loads(
-                raw.decode("utf-8") or "{}",
+                decoded or "{}",
                 object_pairs_hook=_unique_json_object,
                 parse_constant=_reject_json_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, OverflowError):
             self._json(400, {"status": "error", "error": "malformed, duplicate-key, or non-finite JSON request body"})
+            return
+        except Exception:
+            self._json(400, {"status": "error", "error": "malformed JSON request body"})
             return
         if not isinstance(body, dict):
             self._json(400, {"status": "error", "error": "request body must be a JSON object"})
@@ -585,10 +806,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class PlaneHTTPServer(ThreadingHTTPServer):
+    """One stalled client must not block the accept loop or other requests."""
+
+    daemon_threads = True
+    request_queue_size = 256
+    allow_reuse_address = True
+
+
+def make_server(host: str, port: int) -> PlaneHTTPServer:
+    return PlaneHTTPServer((host, port), Handler)
+
+
 def main() -> None:
     host = os.environ.get("PLANE_HOST", "127.0.0.1")
-    port = int(os.environ.get("PLANE_PORT", "8090"))
-    httpd = HTTPServer((host, port), Handler)
+    port = int(os.environ.get("PLANE_PORT", str(DEFAULT_PORT)))
+    httpd = make_server(host, port)
     print(f"Broker+Executor on http://{host}:{port} (ed25519)")
     httpd.serve_forever()
 
