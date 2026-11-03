@@ -84,6 +84,7 @@ def verify_requester_assertion(
     now: datetime | None = None,
     clock_skew_seconds: int = 30,
     max_lifetime_seconds: int = 60,
+    allow_expired_for_replay: bool = False,
 ) -> str:
     if not isinstance(assertion, dict) or set(assertion) != ASSERTION_FIELDS:
         raise DelegationError("requester assertion schema mismatch")
@@ -126,8 +127,10 @@ def verify_requester_assertion(
         raise DelegationError("verification clock must be finite")
     if issued.timestamp() > current_ts + clock_skew_seconds:
         raise DelegationError("requester assertion is premature")
-    # Clock skew may excuse a slightly future iat, but must never extend exp.
-    if expires.timestamp() <= current_ts:
+    # Expired assertions may be authenticated for lookup only. The caller must
+    # prove an exact, previously persisted correlation/request digest match and
+    # must never use this mode to create a new delegation.
+    if expires.timestamp() <= current_ts and not allow_expired_for_replay:
         raise DelegationError("requester assertion is expired")
     if expires <= issued or (expires - issued).total_seconds() > max_lifetime_seconds:
         raise DelegationError("requester assertion lifetime exceeds policy")
