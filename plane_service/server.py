@@ -406,6 +406,19 @@ ROUTES = {
 }
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value):
+    raise ValueError("non-finite JSON constant is forbidden: " + value)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[broker+executor] {self.command} {self.path} " + (fmt % args))
@@ -415,9 +428,12 @@ class Handler(BaseHTTPRequestHandler):
         if path not in ROUTES:
             self._json(404, {"status": "error", "error": "unknown path"})
             return
+        if self.headers.get("Transfer-Encoding"):
+            self._json(501, {"status": "error", "error": "transfer-encoded request bodies are unsupported"})
+            return
         try:
             n = int(self.headers.get("Content-Length") or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             self._json(400, {"status": "error", "error": "invalid Content-Length"})
             return
         if n < 0:
@@ -431,9 +447,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"status": "error", "error": "incomplete request body"})
             return
         try:
-            body = json.loads(raw.decode("utf-8") or "{}")
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._json(400, {"status": "error", "error": "malformed JSON request body"})
+            body = json.loads(
+                raw.decode("utf-8") or "{}",
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
+            self._json(400, {"status": "error", "error": "malformed, duplicate-key, or non-finite JSON request body"})
             return
         if not isinstance(body, dict):
             self._json(400, {"status": "error", "error": "request body must be a JSON object"})
