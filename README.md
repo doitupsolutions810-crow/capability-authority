@@ -28,7 +28,11 @@ bash scripts/run_ci_local.sh
 
 See `docs/CI.md`.
 
-## Delegated workload capabilities\n\nThe `POST /v1/capabilities/delegate` endpoint supports short-lived, signed requester assertions, pinned requester keys, exact audience allowlists, parent-right attenuation, parent-lifetime bounds, one-use assertion IDs, idempotent correlation replay, and durable issuance evidence. See [docs/DELEGATED_CAPABILITY_ISSUANCE.md](docs/DELEGATED_CAPABILITY_ISSUANCE.md). It remains disabled until production trust roots and secret mounts are provisioned.\n\n## Hard rules
+## Delegated workload capabilities
+
+The `POST /v1/capabilities/delegate` endpoint supports short-lived, signed requester assertions, pinned requester keys, exact audience allowlists, parent-right attenuation, parent-lifetime bounds, one-use assertion IDs, idempotent correlation replay, and durable issuance evidence. See [docs/DELEGATED_CAPABILITY_ISSUANCE.md](docs/DELEGATED_CAPABILITY_ISSUANCE.md). It remains disabled until production trust roots and secret mounts are provisioned.
+
+## Hard rules
 
 - No ambient shell or god tokens
 - Timeout = unknown → reconcile before retry
