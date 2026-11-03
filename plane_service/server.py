@@ -172,8 +172,6 @@ def handle_delegate(body: dict) -> dict:
         return {"status": "error", "error": "invalid parent capability signature"}
     if parent.get("issuer") != ISSUER:
         return {"status": "error", "error": "parent capability issuer mismatch"}
-    if check_bounds(parent, acceptance):
-        return {"status": "error", "error": "parent capability bounds rejected"}
     if parent.get("audience") != requester:
         return {"status": "error", "error": "parent capability audience must match authenticated requester"}
     audience, rights = body.get("audience"), body.get("rights")
@@ -184,19 +182,21 @@ def handle_delegate(body: dict) -> dict:
     allowed_audiences = {item.strip() for item in os.environ.get("PLANE_DELEGATION_ALLOWED_AUDIENCES", "").split(",") if item.strip()}
     if not allowed_audiences:
         return {"status": "error", "error": "delegation audience allowlist is not configured"}
+    # Reconcile an already-issued correlation before checking parent expiry.
+    # A caller retrying after a lost response must receive the exact same child.
+    if not isinstance(audience, str) or audience not in allowed_audiences:
+        return {"status": "error", "error": "delegated audience is not allowlisted"}
+    parent_constraints = parent.get("constraints")
+    if not isinstance(parent_constraints, dict) or audience not in (parent_constraints.get("delegation_audiences") or []):
+        return {"status": "error", "error": "delegated audience is not authorized by parent constraints"}
     try:
-        ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=time.time(), max_delegation_depth=int(acceptance.get("max_delegation_depth") or 3))
-        parent_depth = parent.get("delegation_depth", 0)
-        constraints = parent.get("constraints")
-        if not isinstance(constraints, dict):
-            raise DelegationError("parent constraints must be an object")
-        policy.authorize(audience, rights, constraints, ttl)
-    except (DelegationError, PolicyError, TypeError, ValueError) as exc:
-        return {"status": "error", "error": str(exc)}
-    request_digest = "sha256:" + hashlib.sha256(canonical({
-        "parent_capability_id": parent.get("id"), "audience": audience,
-        "rights": rights, "ttl_seconds": requested_ttl, "requester": requester,
-    })).hexdigest()
+        parent_digest = hashlib.sha256(canonical(parent)).hexdigest()
+        request_digest = "sha256:" + hashlib.sha256(canonical({
+            "parent_capability_digest": parent_digest, "audience": audience,
+            "rights": rights, "ttl_seconds": requested_ttl, "requester": requester,
+        })).hexdigest()
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        return {"status": "error", "error": "delegation request is not canonical finite JSON"}
     from evidence.index import get_index
     index = get_index()
     prior = index.query(message_type="CapabilityDelegated", correlation_id=correlation_id, limit=1)
@@ -207,6 +207,17 @@ def handle_delegate(body: dict) -> dict:
         if not isinstance(row.get("capability"), dict) or not isinstance(row.get("signature"), str):
             return {"status": "error", "error": "prior delegation evidence is incomplete"}
         return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": row["capability"], "signature": row["signature"], "idempotent_replay": True}
+    if check_bounds(parent, acceptance):
+        return {"status": "error", "error": "parent capability bounds rejected"}
+    try:
+        ttl = validate_delegation(parent, requester=requester, audience=audience, rights=rights, ttl_seconds=requested_ttl, allowed_audiences=allowed_audiences, now_ts=time.time(), max_delegation_depth=int(acceptance.get("max_delegation_depth") or 3))
+        parent_depth = parent.get("delegation_depth", 0)
+        constraints = parent.get("constraints")
+        if not isinstance(constraints, dict):
+            raise DelegationError("parent constraints must be an object")
+        policy.authorize(audience, rights, constraints, ttl)
+    except (DelegationError, PolicyError, TypeError, ValueError) as exc:
+        return {"status": "error", "error": str(exc)}
     reused = index.query(message_type="CapabilityDelegated", message_id=jti, limit=1)
     if reused:
         return {"status": "error", "error": "requester assertion replay detected"}
