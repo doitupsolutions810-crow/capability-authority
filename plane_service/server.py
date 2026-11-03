@@ -18,7 +18,7 @@ os.chdir(ROOT)
 
 from plane_service.bounds import check_bounds, load_acceptance
 from plane_service.core import attenuate, issue, verify
-from plane_service.crypto_sign import public_key_b64, sign, verify_sig
+from plane_service.crypto_sign import canonical, public_key_b64, sign, verify_sig
 from plane_service.executor import Executor
 from plane_service.policy import PolicyEngine, PolicyError
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
@@ -204,6 +204,8 @@ def handle_execute(body: dict) -> dict:
         limit=1,
     )
     action = f"{required.get('type')}:{required.get('resource')}:{required.get('method')}"
+    payload_bytes = canonical({"required": required, "input": action_input})
+    payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
     if prior:
         prior_receipt = prior[0].get("receipt") or {}
         if (prior_receipt.get("action") != action or prior_receipt.get("capability_id") != cap.get("id") or prior_receipt.get("payload_digest") != payload_digest):
@@ -218,8 +220,6 @@ def handle_execute(body: dict) -> dict:
         }
 
     message_id = uuid.uuid4().hex
-    payload_bytes = json.dumps({"required": required, "input": action_input}, sort_keys=True, separators=(",", ":")).encode()
-    payload_digest = "sha256:" + hashlib.sha256(payload_bytes).hexdigest()
     previous_receipt_digest = None
     prior_receipts = index.query(
         capability_id=cap.get("id"),
