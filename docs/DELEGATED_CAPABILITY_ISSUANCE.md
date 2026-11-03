@@ -20,7 +20,7 @@ AVRONE cannot request its own parent capability by passing a JSON `caller`; that
 export PLANE_DELEGATION_REQUESTER_ID=spiffe://prod/agent/avrone
 export PLANE_DELEGATION_REQUESTER_PUBLIC_KEY_FILE=/run/secrets/avrone-delegation-requester.pub
 export PLANE_DELEGATION_ALLOWED_AUDIENCES=spiffe://prod/agent/swarm
-export PLANE_AVRONE_PARENT_CAPABILITY_FILE=/run/secrets/avrone-swarm-parent-capability.json
+export PLANE_AVRONE_PARENT_CAPABILITY_FILE=/var/lib/capability-authority/avrone-swarm-parent-capability.json
 export PLANE_AVRONE_PARENT_CAPABILITY_CORRELATION_ID=avrone-swarm-root-2026-11-03
 python scripts/issue_avrone_swarm_parent.py
 ```
