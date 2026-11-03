@@ -229,9 +229,7 @@ def handle_execute(body: dict) -> dict:
     if prior_receipts:
         previous = prior_receipts[0].get("receipt") or {}
         if previous:
-            previous_receipt_digest = "sha256:" + hashlib.sha256(
-                json.dumps(previous, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
+            previous_receipt_digest = "sha256:" + hashlib.sha256(canonical(previous)).hexdigest()
 
     result = executor.execute(
         cap, sig, required, caller,
