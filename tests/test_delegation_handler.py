@@ -175,3 +175,25 @@ def test_http_json_constant_parser_rejects_nan_and_infinity():
     for value in ("NaN", "Infinity", "-Infinity"):
         with pytest.raises(ValueError, match="non-finite"):
             server._reject_json_constant(value)
+
+
+def test_delegation_evidence_has_stable_correlation_event_id(delegation_env):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    result = server.handle_delegate(request)
+    assert result["status"] == "ok"
+    expected = "delegation:" + hashlib.sha256(request["correlation_id"].encode("ascii")).hexdigest()
+    assert index.rows[0]["event_id"] == expected
+
+
+def test_same_correlation_with_fresh_assertion_jti_returns_original_child(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    jtis = iter(["jti-first", "jti-retry"])
+    monkeypatch.setattr(server, "verify_requester_assertion", lambda *a, **k: next(jtis))
+    first = server.handle_delegate(request)
+    second = server.handle_delegate(request)
+    assert first["status"] == second["status"] == "ok"
+    assert second["idempotent_replay"] is True
+    assert second["capability"] == first["capability"]
+    assert len(index.rows) == 1
