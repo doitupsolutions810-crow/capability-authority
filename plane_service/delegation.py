@@ -102,11 +102,22 @@ def validate_delegation(
     allowed_audiences: set[str],
     now_ts: float,
     max_ttl_seconds: int = 300,
+    max_delegation_depth: int = 3,
 ) -> int:
     if not isinstance(parent, dict):
         raise DelegationError("parent capability must be an object")
-    if parent.get("audience") != requester:
+    if not isinstance(requester, str) or not requester.strip() or parent.get("audience") != requester:
         raise DelegationError("parent capability audience must match authenticated requester")
+    if not isinstance(parent.get("id"), str) or not parent["id"].strip():
+        raise DelegationError("parent capability id is required")
+    depth = parent.get("delegation_depth", 0)
+    if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0 or depth + 1 > max_delegation_depth:
+        raise DelegationError("maximum delegation depth exceeded")
+    issued_at = parent.get("issued_at")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)) or not math.isfinite(issued_at):
+        raise DelegationError("parent capability issue time is invalid")
+    if issued_at > now_ts + 30 or issued_at >= parent.get("expires_at", 0):
+        raise DelegationError("parent capability issue time is invalid")
     if not isinstance(audience, str) or audience not in allowed_audiences:
         raise DelegationError("delegated audience is not allowlisted")
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= max_ttl_seconds:
