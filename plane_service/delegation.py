@@ -113,18 +113,20 @@ def validate_delegation(
     depth = parent.get("delegation_depth", 0)
     if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0 or depth + 1 > max_delegation_depth:
         raise DelegationError("maximum delegation depth exceeded")
+    parent_expiry = parent.get("expires_at")
+    if isinstance(parent_expiry, bool) or not isinstance(parent_expiry, (int, float)) or not math.isfinite(parent_expiry):
+        raise DelegationError("parent capability expiry is invalid")
+    if parent_expiry <= now_ts:
+        raise DelegationError("parent capability is expired")
     issued_at = parent.get("issued_at")
     if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)) or not math.isfinite(issued_at):
         raise DelegationError("parent capability issue time is invalid")
-    if issued_at > now_ts + 30 or issued_at >= parent.get("expires_at", 0):
+    if issued_at > now_ts + 30 or issued_at >= parent_expiry:
         raise DelegationError("parent capability issue time is invalid")
     if not isinstance(audience, str) or audience not in allowed_audiences:
         raise DelegationError("delegated audience is not allowlisted")
     if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int) or not 1 <= ttl_seconds <= max_ttl_seconds:
         raise DelegationError("delegated TTL must be an integer within policy")
-    parent_expiry = parent.get("expires_at")
-    if isinstance(parent_expiry, bool) or not isinstance(parent_expiry, (int, float)) or not math.isfinite(parent_expiry):
-        raise DelegationError("parent capability expiry is invalid")
     remaining = math.floor(parent_expiry - now_ts)
     if remaining < 1:
         raise DelegationError("parent capability is expired")
