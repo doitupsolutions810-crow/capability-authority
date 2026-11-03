@@ -178,7 +178,13 @@ def handle_delegate(body: dict) -> dict:
             if key_fd >= 0:
                 os.close(key_fd)
         assertion = body.get("requester_assertion")
-        jti = verify_requester_assertion(assertion, requester_public_key, expected_issuer=requester, expected_audience=ISSUER)
+        # Authenticate identity and signature before reconciliation, but defer
+        # expiry enforcement until after exact prior-request lookup. This allows
+        # only an idempotent read of an existing result after assertion expiry.
+        jti = verify_requester_assertion(
+            assertion, requester_public_key, expected_issuer=requester,
+            expected_audience=ISSUER, allow_expired_for_replay=True,
+        )
     except (OSError, DelegationError) as exc:
         return {"status": "error", "error": str(exc)}
     parent = body.get("parent_capability")
@@ -233,6 +239,15 @@ def handle_delegate(body: dict) -> dict:
                 "capability_id": prior_child.get("id"), "idempotent_replay": True,
             }
         return {"status": "ok", "message_id": row.get("message_id"), "correlation_id": correlation_id, "capability": prior_child, "signature": row["signature"], "idempotent_replay": True}
+    # No prior result exists. An expired assertion must never authorize a
+    # first issuance, even when its signature and identity remain authentic.
+    try:
+        verify_requester_assertion(
+            assertion, requester_public_key, expected_issuer=requester,
+            expected_audience=ISSUER,
+        )
+    except DelegationError as exc:
+        return {"status": "error", "error": str(exc)}
     if check_bounds(parent, acceptance):
         return {"status": "error", "error": "parent capability bounds rejected"}
     try:
