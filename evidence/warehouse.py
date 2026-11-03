@@ -34,7 +34,9 @@ def _normalized_delegation_correlation_id(event):
     if not isinstance(event, dict) or event.get("message_type") != "CapabilityDelegated":
         return None
     correlation_id = event.get("correlation_id")
-    return correlation_id if isinstance(correlation_id, str) and correlation_id.strip() else None
+    if not isinstance(correlation_id, str) or not correlation_id.strip():
+        raise ValueError("CapabilityDelegated evidence requires a non-empty correlation_id")
+    return correlation_id
 
 
 class EvidenceWarehouse:
@@ -136,11 +138,14 @@ class EvidenceWarehouse:
 
             if event_id is not None:
                 existing = c.execute(
-                    "SELECT payload, prev_digest, digest FROM evidence WHERE event_id = ?",
+                    "SELECT payload, prev_digest, digest, delegation_correlation_id "
+                    "FROM evidence WHERE event_id = ?",
                     (event_id,),
                 ).fetchone()
                 if existing:
                     existing_event = json.loads(existing[0])
+                    if _normalized_delegation_correlation_id(existing_event) != existing[3]:
+                        raise ValueError("delegation correlation projection is inconsistent with evidence")
                     if _canonical(_logical_event(existing_event)) != _canonical(_logical_event(event)):
                         raise ValueError(
                             f"event_id {event_id!r} was already committed with a different payload"
@@ -187,12 +192,13 @@ class EvidenceWarehouse:
             c.execute("PRAGMA busy_timeout = 30000")
             c.execute("BEGIN")
             rows = c.execute(
-                "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
+                "SELECT payload, prev_digest, digest, event_id, delegation_correlation_id "
+                "FROM evidence ORDER BY id"
             ).fetchall()
 
         prev = "0" * 64
         events = []
-        for payload, prev_d, digest, stored_event_id in rows:
+        for payload, prev_d, digest, stored_event_id, stored_correlation_id in rows:
             if prev_d != prev:
                 raise ValueError("evidence warehouse chain is invalid: prev mismatch")
             event = json.loads(payload)
@@ -200,6 +206,8 @@ class EvidenceWarehouse:
                 raise ValueError("evidence warehouse chain is invalid: payload is not an object")
             if _normalized_event_id(event) != stored_event_id:
                 raise ValueError("evidence warehouse chain is invalid: event identity mismatch")
+            if _normalized_delegation_correlation_id(event) != stored_correlation_id:
+                raise ValueError("evidence warehouse chain is invalid: delegation correlation identity mismatch")
             expected = _digest(prev, event)
             if expected != digest:
                 raise ValueError("evidence warehouse chain is invalid: digest mismatch")
@@ -212,15 +220,22 @@ class EvidenceWarehouse:
     def verify_chain(self):
         with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
             rows = c.execute(
-                "SELECT payload, prev_digest, digest, event_id FROM evidence ORDER BY id"
+                "SELECT payload, prev_digest, digest, event_id, delegation_correlation_id "
+                "FROM evidence ORDER BY id"
             ).fetchall()
         prev = "0" * 64
-        for payload, prev_d, digest, stored_event_id in rows:
+        for payload, prev_d, digest, stored_event_id, stored_correlation_id in rows:
             if prev_d != prev:
                 return {"ok": False, "error": "prev mismatch"}
             event = json.loads(payload)
             if _normalized_event_id(event) != stored_event_id:
                 return {"ok": False, "error": "event identity mismatch"}
+            try:
+                correlation_id = _normalized_delegation_correlation_id(event)
+            except ValueError:
+                return {"ok": False, "error": "delegation correlation identity mismatch"}
+            if correlation_id != stored_correlation_id:
+                return {"ok": False, "error": "delegation correlation identity mismatch"}
             expect = _digest(prev, event)
             if expect != digest:
                 return {"ok": False, "error": "digest mismatch"}
