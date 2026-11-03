@@ -8,7 +8,7 @@ The new `POST /v1/capabilities/delegate` route issues an attenuated child capabi
 2. The Authority verifies the assertion against the independently provisioned `PLANE_DELEGATION_REQUESTER_PUBLIC_KEY_FILE` and exact configured `PLANE_DELEGATION_REQUESTER_ID`.
 3. The assertion's issuer and subject must both equal the pinned AVRONE identity, its audience must be the Authority SPIFFE identity, its lifetime is at most 60 seconds, and its `jti` is one-use.
 4. The parent capability must have a valid Authority signature, issuer, bounds, and an audience exactly equal to the authenticated requester.
-5. The requested child audience must be in `PLANE_DELEGATION_ALLOWED_AUDIENCES`. Child rights must be an exact subset of parent `(type, resource, method)` tuples. No wildcard or method substitution is accepted.
+5. The requested child audience must be in both `PLANE_DELEGATION_ALLOWED_AUDIENCES` and the parent capability's signed `constraints.delegation_audiences` list. Child rights must be an exact subset of parent `(type, resource, method)` tuples. No wildcard or method substitution is accepted.
 6. Child TTL is capped by the parent's remaining lifetime, the Authority's maximum TTL, and the configured maximum delegation depth. Parent constraints are inherited unchanged.
 7. The child capability and signed response are written to the durable evidence index before the endpoint returns success. A repeated correlation ID returns the same child only for an identical request; reusing the assertion `jti` with a different correlation ID is rejected.
 
