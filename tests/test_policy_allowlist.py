@@ -68,3 +68,21 @@ def test_explicit_allowlist_can_be_narrowed():
             {},
             60,
         )
+
+
+def test_swarm_enqueue_is_exact_post_only():
+    policy = PolicyEngine()
+    policy.authorize(
+        "spiffe://prod/agent/swarm",
+        [{"type": "Execute", "resource": "swarm.jobs", "method": "POST"}],
+        {},
+        60,
+    )
+    for method in ("GET", "PUT", "DELETE", "*"):
+        with pytest.raises(PolicyError):
+            policy.authorize(
+                "spiffe://prod/agent/swarm",
+                [{"type": "Execute", "resource": "swarm.jobs", "method": method}],
+                {},
+                60,
+            )
