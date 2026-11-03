@@ -160,6 +160,39 @@ class EvidenceWarehouseConcurrencyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "duplicate historical correlation_id"):
                 EvidenceWarehouse(db)
 
+    def test_delegation_correlation_projection_tampering_is_detected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "evidence.db"
+            warehouse = EvidenceWarehouse(db)
+            warehouse.append({
+                "event_id": "delegation:projection-test",
+                "message_type": "CapabilityDelegated",
+                "message_id": "projection-test",
+                "correlation_id": "original-correlation",
+            })
+
+            with sqlite3.connect(db) as connection:
+                connection.execute(
+                    "UPDATE evidence SET delegation_correlation_id = ?",
+                    ("tampered-correlation",),
+                )
+
+            verified = warehouse.verify_chain()
+            self.assertFalse(verified["ok"])
+            self.assertEqual(verified["error"], "delegation correlation identity mismatch")
+            with self.assertRaisesRegex(ValueError, "delegation correlation identity mismatch"):
+                warehouse.read_verified_events()
+
+    def test_delegation_evidence_requires_a_non_empty_correlation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            warehouse = EvidenceWarehouse(Path(tmp) / "evidence.db")
+            with self.assertRaisesRegex(ValueError, "requires a non-empty correlation_id"):
+                warehouse.append({
+                    "event_id": "delegation:missing-correlation",
+                    "message_type": "CapabilityDelegated",
+                    "message_id": "missing-correlation",
+                })
+
     def test_concurrent_duplicate_event_id_is_committed_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             warehouse = EvidenceWarehouse(Path(tmp) / "evidence.db")
