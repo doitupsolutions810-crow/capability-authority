@@ -163,3 +163,14 @@ def test_parent_with_malformed_delegation_scope_is_rejected(delegation_env):
     result = server.handle_delegate(request)
     assert result["status"] == "error"
     assert "parent constraints" in result["error"]
+
+
+def test_http_json_object_parser_rejects_duplicate_keys():
+    with pytest.raises(ValueError, match="duplicate"):
+        server._unique_json_object([("audience", SWARM), ("audience", "spiffe://prod/agent/attacker")])
+
+
+def test_http_json_constant_parser_rejects_nan_and_infinity():
+    for value in ("NaN", "Infinity", "-Infinity"):
+        with pytest.raises(ValueError, match="non-finite"):
+            server._reject_json_constant(value)
