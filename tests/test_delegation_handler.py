@@ -197,3 +197,43 @@ def test_same_correlation_with_fresh_assertion_jti_returns_original_child(delega
     assert second["idempotent_replay"] is True
     assert second["capability"] == first["capability"]
     assert len(index.rows) == 1
+
+
+def test_same_correlation_reconciles_after_requester_assertion_expiry(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    original_now = server.time.time()
+    first = server.handle_delegate(request)
+    assert first["status"] == "ok"
+    # The assertion expires after 20 seconds; the delegated child remains valid.
+    monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
+    second = server.handle_delegate(request)
+    assert second["status"] == "ok"
+    assert second["idempotent_replay"] is True
+    assert second["capability"] == first["capability"]
+    assert second["signature"] == first["signature"]
+    assert len(index.rows) == 1
+
+
+def test_expired_assertion_cannot_create_a_new_correlation(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    original_now = server.time.time()
+    monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
+    result = server.handle_delegate(request)
+    assert result["status"] == "error"
+    assert result["error"] == "requester assertion is expired"
+    assert index.rows == []
+
+
+def test_expired_assertion_cannot_replay_same_correlation_with_changed_request(delegation_env, monkeypatch):
+    requester_key, index = delegation_env
+    request = make_request(requester_key)
+    original_now = server.time.time()
+    first = server.handle_delegate(request)
+    assert first["status"] == "ok"
+    monkeypatch.setattr(server.time, "time", lambda: original_now + 35)
+    conflict = server.handle_delegate({**request, "ttl_seconds": 60})
+    assert conflict["status"] == "error"
+    assert conflict["error"] == "delegation_correlation_replay_conflict"
+    assert len(index.rows) == 1
