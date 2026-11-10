@@ -111,7 +111,11 @@ class EvidenceIndex:
                 pass
 
     def _append_projection(self, new_docs: List[dict]) -> None:
-        """Add verified events without rewriting the checkpointed prefix."""
+        """Add verified events without rewriting the checkpointed prefix.
+
+        The splice point is the final non-whitespace byte, which must be the
+        array closer. A ``]`` inside an earlier string is not a closer.
+        """
         if not new_docs:
             return
         if not self.path.exists() or self.path.stat().st_size == 0:
@@ -124,13 +128,13 @@ class EvidenceIndex:
             window = min(end, 4096)
             handle.seek(end - window)
             tail = handle.read(window)
-            relative = tail.rfind(b"]")
-            if relative < 0:
+            stripped = tail.rstrip()
+            if not stripped.endswith(b"]"):
                 raise ValueError(
                     f"evidence index is unreadable; refusing to reset history: {self.path}"
                 )
-            absolute = end - window + relative
-            before = tail[:relative].rstrip()
+            absolute = end - window + len(stripped) - 1
+            before = stripped[:-1].rstrip()
             empty = before.endswith(b"[") or before == b""
             payload = bytearray()
             for index, piece in enumerate(pieces):
@@ -144,20 +148,34 @@ class EvidenceIndex:
             os.fsync(handle.fileno())
             handle.truncate()
 
+    def _sync_from_genesis(self, warehouse) -> List[dict]:
+        events, last_id, tip = warehouse.read_verified_chain()
+        if self._docs != events or (events and not self.path.exists()):
+            self._write_atomic(events)
+        self._docs = events
+        self._through_id = last_id
+        self._tip = tip
+        self._synced = True
+        return self._docs
+
     def _refresh_from_warehouse(self, warehouse) -> List[dict]:
         if not self._synced:
-            events, last_id, tip = warehouse.read_verified_chain()
-            if self._docs != events:
-                self._write_atomic(events)
-            self._docs = events
-            self._through_id = last_id
-            self._tip = tip
-            self._synced = True
-            return self._docs
-        new_events, last_id, tip = warehouse.read_verified_chain(self._through_id, self._tip)
+            return self._sync_from_genesis(warehouse)
+        try:
+            new_events, last_id, tip = warehouse.read_verified_chain(self._through_id, self._tip)
+        except ValueError:
+            # A stale checkpoint or a broken suffix must not append. Rebuild
+            # from genesis so a valid chain is repaired and a corrupt one
+            # still fails closed.
+            self._synced = False
+            return self._sync_from_genesis(warehouse)
         if not new_events:
             return self._docs
-        self._append_projection(new_events)
+        try:
+            self._append_projection(new_events)
+        except Exception:
+            self._synced = False
+            raise
         self._docs.extend(new_events)
         self._through_id = last_id
         self._tip = tip

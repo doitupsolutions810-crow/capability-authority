@@ -231,7 +231,7 @@ def handle_issue(body: dict) -> dict:
             "broker_public_key_b64": public_key_b64(),
             "_identity_source": body.get("_identity_source"),
         }
-    fingerprint = _issue_fingerprint(caller, rights, constraints, ttl)
+    fingerprint = _issue_fingerprint(caller, rights, constraints, raw_ttl)
     try:
         record, created = get_issuance_store().commit_or_replay(
             correlation_id=correlation_id,
@@ -733,6 +733,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             decoded = raw.decode("utf-8")
+            if decoded.startswith("\ufeff"):
+                decoded = decoded[1:]
             body = json.loads(
                 decoded or "{}",
                 object_pairs_hook=_unique_json_object,
