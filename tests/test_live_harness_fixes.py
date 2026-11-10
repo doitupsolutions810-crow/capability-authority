@@ -176,8 +176,18 @@ def test_stalled_body_does_not_block_other_requests(monkeypatch):
                 if not chunk:
                     break
                 reply += chunk
-            assert b"413" in reply.split(b"\r\n", 1)[0]
-            assert b"64 KiB" in reply
+            header, _, body = reply.partition(b"\r\n\r\n")
+            length = 0
+            for line in header.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    length = int(line.split(b":", 1)[1].strip())
+            while len(body) < length:
+                chunk = huge.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+            assert b"413" in header.split(b"\r\n", 1)[0]
+            assert b"64 KiB" in body
         finally:
             huge.close()
     finally:
