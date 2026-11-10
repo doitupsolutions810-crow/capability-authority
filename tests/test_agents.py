@@ -21,10 +21,10 @@ def test_mount_and_spawn():
     if child.get("status") != "spawned":
         _fail(str(child))
     out = Executor().execute(child["capability"], child["signature"], {"type": "read", "resource": "demo", "method": "GET"}, child["spiffe_id"])
-    if out.get("status") != "ok":
+    if out.get("status") != "authorized" or out.get("execution_status") != "NOT_IMPLEMENTED":
         _fail(str(out))
     denied = Executor().execute(child["capability"], child["signature"], {"type": "read", "resource": "demo", "method": "DELETE"}, child["spiffe_id"])
-    if denied.get("status") == "ok":
+    if denied.get("status") in ("ok", "authorized", "executed"):
         _fail("method substitution executed")
     print("PASS mount_and_spawn")
 

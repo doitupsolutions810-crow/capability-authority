@@ -96,13 +96,21 @@ def test_hands_deny():
 
 
 def test_prod_preflight_fail_closed():
+    saved = {key: os.environ.get(key) for key in ("PRODUCTION", "PLANE_SPIFFE_ID", "SPIFFE_ENDPOINT_SOCKET", "PLANE_BROKER_MEASUREMENT")}
     os.environ["PRODUCTION"] = "1"
     os.environ.pop("PLANE_SPIFFE_ID", None)
     os.environ.pop("SPIFFE_ENDPOINT_SOCKET", None)
     os.environ["PLANE_BROKER_MEASUREMENT"] = "dev:unattested"
-    from rings.production_profile import preflight
-    if preflight().ok:
-        _fail("should fail closed")
+    try:
+        from rings.production_profile import preflight
+        if preflight().ok:
+            _fail("should fail closed")
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
     print("PASS prod_preflight_fail_closed")
 
 

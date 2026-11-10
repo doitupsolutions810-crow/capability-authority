@@ -40,28 +40,46 @@ def test_receipt_verify_cli():
         _fail(proc.stdout)
     print("PASS receipt_verify_cli")
 
+_SPIFFE_ENV = (
+    "SPIFFE_REQUIRED", "SPIFFE_ENDPOINT_SOCKET", "PLANE_SPIFFE_ID", "SPIFFE_ID",
+    "PRODUCTION", "PLANE_PRODUCTION",
+)
+
+def _restore_env(saved):
+    for key, value in saved.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
 def test_spire_fail_closed_without_agent():
+    saved = {key: os.environ.get(key) for key in _SPIFFE_ENV}
     os.environ["SPIFFE_REQUIRED"] = "1"
-    for k in ("SPIFFE_ENDPOINT_SOCKET", "PLANE_SPIFFE_ID", "PRODUCTION", "PLANE_PRODUCTION"):
-        os.environ.pop(k, None)
-    from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
+    for key in ("SPIFFE_ENDPOINT_SOCKET", "PLANE_SPIFFE_ID", "SPIFFE_ID", "PRODUCTION", "PLANE_PRODUCTION"):
+        os.environ.pop(key, None)
     try:
-        bind_issue_request({"caller": "spiffe://prod/agent/dev"})
-    except SpiffeBindingError:
-        print("PASS spire_fail_closed")
-        os.environ.pop("SPIFFE_REQUIRED", None)
-        return
-    os.environ.pop("SPIFFE_REQUIRED", None)
-    _fail("should fail closed")
+        from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
+        try:
+            bind_issue_request({"caller": "spiffe://prod/agent/dev"})
+        except SpiffeBindingError:
+            print("PASS spire_fail_closed")
+            return
+        _fail("should fail closed")
+    finally:
+        _restore_env(saved)
 
 def test_spire_lab_fallback_when_not_required():
-    for k in ("SPIFFE_REQUIRED", "PRODUCTION", "PLANE_PRODUCTION", "SPIFFE_ENDPOINT_SOCKET", "PLANE_SPIFFE_ID"):
-        os.environ.pop(k, None)
-    from plane_service.spiffe_identity import fetch_workload_identity
-    ident = fetch_workload_identity()
-    if ident.source != "fallback":
-        _fail(ident.source)
-    print("PASS spire_lab_fallback")
+    saved = {key: os.environ.get(key) for key in _SPIFFE_ENV}
+    for key in _SPIFFE_ENV:
+        os.environ.pop(key, None)
+    try:
+        from plane_service.spiffe_identity import fetch_workload_identity
+        ident = fetch_workload_identity()
+        if ident.source != "fallback":
+            _fail(ident.source)
+        print("PASS spire_lab_fallback")
+    finally:
+        _restore_env(saved)
 
 def main():
     test_evidence_index_and_query()

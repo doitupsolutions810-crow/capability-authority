@@ -52,6 +52,10 @@ class PolicyEngine:
         for right in rights:
             if not isinstance(right, dict):
                 raise PolicyError("each capability right must be an object")
+            if "method" not in right:
+                raise PolicyError(
+                    "capability right requires an explicit method; methodless rights are rejected"
+                )
             if set(right) != {"type", "resource", "method"}:
                 raise PolicyError("capability right requires exactly type, resource, and method")
             kind, resource, method = right.get("type"), right.get("resource"), right.get("method")

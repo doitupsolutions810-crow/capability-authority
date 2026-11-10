@@ -5,7 +5,7 @@ import json, os, ssl, urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
-UPSTREAM = os.environ.get("PLANE_UPSTREAM", "http://127.0.0.1:8090")
+UPSTREAM = os.environ.get("PLANE_UPSTREAM", "http://127.0.0.1:8095")
 ALLOWED = {
     "/health",
     "/v1/capabilities/issue",

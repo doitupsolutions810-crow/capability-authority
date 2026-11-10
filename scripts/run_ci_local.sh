@@ -15,6 +15,7 @@ echo "==> tests"
 python3 tests/test_plane.py
 python3 tests/test_evidence_receipt_spiffe.py
 python3 tests/test_agents.py
+python3 -m pytest -q tests/test_delegation.py tests/test_delegation_handler.py tests/test_issuance_idempotency.py tests/test_http_body_bounds.py tests/test_live_harness_fixes.py tests/test_evidence_warehouse_concurrency.py tests/test_evidence_index_projection_consistency.py tests/test_evidence_index_fail_closed.py tests/test_issue_ledger_latency.py
 
 echo "==> demos"
 python3 scripts/demo_hands.py
