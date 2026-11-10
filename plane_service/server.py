@@ -422,6 +422,11 @@ def handle_delegate(body: dict) -> dict:
         request_digest = "sha256:" + hashlib.sha256(canonical({
             "parent_capability_digest": parent_digest, "audience": audience,
             "rights": rights, "ttl_seconds": requested_ttl, "requester": requester,
+            # A correlation is idempotent only for the exact same signed requester
+            # assertion identity. Otherwise a fresh JTI could receive the prior
+            # child without being durably recorded under its own event_id.
+            "requester_assertion_jti": jti,
+            "requester_assertion_digest": "sha256:" + hashlib.sha256(canonical(assertion)).hexdigest(),
         })).hexdigest()
     except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
         return {"status": "error", "error": "delegation request is not canonical finite JSON"}
