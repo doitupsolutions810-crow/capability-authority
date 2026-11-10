@@ -5,18 +5,30 @@ from identity.github_app import GitHubAppAuthError, load_config_from_env
 
 
 class GitHubAppFailClosed(unittest.TestCase):
+    _KEYS = (
+        "GITHUB_APP_ID",
+        "GITHUB_APP_INSTALLATION_ID",
+        "GITHUB_APP_PRIVATE_KEY",
+        "GITHUB_APP_PRIVATE_KEY_PATH",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITHUB_ALLOW_PAT_FALLBACK",
+        "PRODUCTION",
+        "PLANE_PRODUCTION",
+        "SPIFFE_REQUIRED",
+    )
+
     def setUp(self):
-        for key in (
-            "GITHUB_APP_ID",
-            "GITHUB_APP_INSTALLATION_ID",
-            "GITHUB_APP_PRIVATE_KEY",
-            "GITHUB_APP_PRIVATE_KEY_PATH",
-            "GITHUB_TOKEN",
-            "GH_TOKEN",
-            "GITHUB_ALLOW_PAT_FALLBACK",
-            "PRODUCTION",
-        ):
+        self._saved = {key: os.environ.get(key) for key in self._KEYS}
+        for key in self._KEYS:
             os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_production_fails_closed(self):
         os.environ["PRODUCTION"] = "1"

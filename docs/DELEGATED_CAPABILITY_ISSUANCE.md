@@ -10,7 +10,7 @@ The new `POST /v1/capabilities/delegate` route issues an attenuated child capabi
 4. The parent capability must have a valid Authority signature, issuer, bounds, and an audience exactly equal to the authenticated requester.
 5. The requested child audience must be in both `PLANE_DELEGATION_ALLOWED_AUDIENCES` and the parent capability's signed `constraints.delegation_audiences` list. Child rights must be an exact subset of parent `(type, resource, method)` tuples. No wildcard or method substitution is accepted.
 6. Child TTL is capped by the parent's remaining lifetime, the Authority's maximum TTL, and the configured maximum delegation depth. Parent constraints are inherited unchanged.
-7. The child capability and signed response are written to the durable evidence index before the endpoint returns success. Idempotency binds the stable correlation ID to both the assertion `jti` and the digest of the full canonical signed requester assertion. A retry must reuse the exact signed assertion and request parameters. A fresh `jti` or altered signed assertion under an already-used correlation is a conflict; reusing one `jti` under a different correlation is rejected.
+7. The signed child is committed to the durable issuance ledger (`PLANE_ISSUANCE_IDEMPOTENCY_PATH`) before the response is returned, then recorded in the evidence index. Idempotency binds the stable correlation ID to the request parameters, the assertion `jti`, and the digest of the full canonical signed requester assertion. A retry must reuse that exact signed assertion and those parameters, including after process restart, and then receives the byte-identical child. A fresh `jti`, an altered signed assertion, or any other parameter change (including method) under an already-used correlation is a conflict. Reusing one `jti` under a different correlation is rejected. Ledger entries expire with the child capability and remain tombstones, so expiry does not mint a replacement. A corrupt or unreadable ledger fails closed.
 
 ## Bootstrap parent capability
 
@@ -64,4 +64,4 @@ The public key must be pinned out of band and correspond to the AVRONE signing k
 
 ## Remaining operational gate
 
-The endpoint code and unit tests do not provision the production key, configure the secret mount, or prove an actual AVRONE-to-Authority signed assertion in the live deployment. Keep the AVRONE→Swarm production route disabled until those are completed and verified.
+The endpoint code and unit tests do not provision the production key, configure the secret mount, or prove an actual AVRONE-to-Authority signed assertion in the live deployment. Put `PLANE_ISSUANCE_IDEMPOTENCY_PATH` on durable storage local to the Authority; the ledger is the replay source Trinity uses after a lost delegation response. Keep the AVRONE→Swarm production route disabled until those are completed and verified.

@@ -9,7 +9,7 @@ from plane_service.policy import PolicyEngine
 
 def main():
     caller = "spiffe://prod/agent/dev"
-    rights = [{"type": "read", "resource": "demo"}]
+    rights = [{"type": "read", "resource": "demo", "method": "GET"}]
     PolicyEngine().authorize(caller, rights, {}, 60)
     cap = issue(caller, "spiffe://prod/broker", rights, {}, 60, "prod", "dev:unattested", 1)
     sig = sign(cap)

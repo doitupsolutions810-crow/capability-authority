@@ -40,6 +40,9 @@ def _normalized_delegation_correlation_id(event):
 
 
 class EvidenceWarehouse:
+    # Genesis-to-tip scans. Issue traffic must not increment this after startup.
+    full_ledger_verifications = 0
+
     def __init__(self, db_path=None):
         root = Path(__file__).resolve().parents[1]
         self.db_path = Path(db_path or root / "data" / "evidence.db")
@@ -186,35 +189,62 @@ class EvidenceWarehouse:
         result["_idempotent_replay"] = False
         return result
 
-    def read_verified_events(self):
-        """Return the ordered ledger only after verifying identities and hashes."""
+    def _project_linked_row(self, prev, payload, prev_d, digest, stored_event_id, stored_correlation_id):
+        """Check one hash-chain link. ``prev`` is the digest the row must extend."""
+        if prev_d != prev:
+            raise ValueError("evidence warehouse chain is invalid: prev mismatch")
+        event = json.loads(payload)
+        if not isinstance(event, dict):
+            raise ValueError("evidence warehouse chain is invalid: payload is not an object")
+        if _normalized_event_id(event) != stored_event_id:
+            raise ValueError("evidence warehouse chain is invalid: event identity mismatch")
+        if _normalized_delegation_correlation_id(event) != stored_correlation_id:
+            raise ValueError("evidence warehouse chain is invalid: delegation correlation identity mismatch")
+        expected = _digest(prev, event)
+        if expected != digest:
+            raise ValueError("evidence warehouse chain is invalid: digest mismatch")
+        projected = dict(event)
+        projected["_digest"] = digest
+        return projected, digest
+
+    def read_verified_chain(self, after_id=0, expected_tip=None):
+        """Verify the suffix after ``after_id``.
+
+        ``after_id == 0`` walks every row from genesis and counts as a full
+        verification. Later calls pass the last verified row id and its digest
+        so only rows committed since that checkpoint are read and hashed.
+        """
+        if expected_tip is None:
+            expected_tip = "0" * 64
+        if isinstance(after_id, bool) or not isinstance(after_id, int) or after_id < 0:
+            raise ValueError("evidence checkpoint row id is invalid")
+        if not isinstance(expected_tip, str) or len(expected_tip) != 64:
+            raise ValueError("evidence checkpoint tip is invalid")
+        if after_id == 0:
+            type(self).full_ledger_verifications += 1
         with closing(sqlite3.connect(str(self.db_path), timeout=30)) as c:
             c.execute("PRAGMA busy_timeout = 30000")
             c.execute("BEGIN")
             rows = c.execute(
-                "SELECT payload, prev_digest, digest, event_id, delegation_correlation_id "
-                "FROM evidence ORDER BY id"
+                "SELECT id, payload, prev_digest, digest, event_id, delegation_correlation_id "
+                "FROM evidence WHERE id > ? ORDER BY id",
+                (after_id,),
             ).fetchall()
 
-        prev = "0" * 64
+        prev = expected_tip
         events = []
-        for payload, prev_d, digest, stored_event_id, stored_correlation_id in rows:
-            if prev_d != prev:
-                raise ValueError("evidence warehouse chain is invalid: prev mismatch")
-            event = json.loads(payload)
-            if not isinstance(event, dict):
-                raise ValueError("evidence warehouse chain is invalid: payload is not an object")
-            if _normalized_event_id(event) != stored_event_id:
-                raise ValueError("evidence warehouse chain is invalid: event identity mismatch")
-            if _normalized_delegation_correlation_id(event) != stored_correlation_id:
-                raise ValueError("evidence warehouse chain is invalid: delegation correlation identity mismatch")
-            expected = _digest(prev, event)
-            if expected != digest:
-                raise ValueError("evidence warehouse chain is invalid: digest mismatch")
-            projected = dict(event)
-            projected["_digest"] = digest
+        last_id = after_id
+        for row_id, payload, prev_d, digest, stored_event_id, stored_correlation_id in rows:
+            projected, prev = self._project_linked_row(
+                prev, payload, prev_d, digest, stored_event_id, stored_correlation_id
+            )
             events.append(projected)
-            prev = digest
+            last_id = row_id
+        return events, last_id, prev
+
+    def read_verified_events(self):
+        """Return the ordered ledger only after verifying identities and hashes."""
+        events, _last_id, _tip = self.read_verified_chain()
         return events
 
     def verify_chain(self):

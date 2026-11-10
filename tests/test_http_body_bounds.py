@@ -1,16 +1,14 @@
-import json
 import threading
-from http.server import HTTPServer
 
 import httpx
 import pytest
 
-from plane_service.server import Handler
+from plane_service.server import make_server
 
 
 @pytest.fixture
 def authority_http():
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = make_server("127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

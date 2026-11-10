@@ -43,10 +43,23 @@ def resolve_issue_identity(
 
 
 def bind_issue_request(body: dict) -> dict:
+    """Bind issuance to the authenticated workload identity.
+
+    A missing caller uses that identity. A supplied caller must match it.
+    ``PLANE_ALLOW_CALLER_OVERRIDE=1`` is the only way to name a different
+    caller, and only outside a live Workload API identity.
+    """
+    requested = body.get("caller") if isinstance(body, dict) else None
+    if requested is not None and (not isinstance(requested, str) or not requested.strip()):
+        raise SpiffeBindingError("caller must be a non-empty SPIFFE ID")
     ident = resolve_issue_identity(
-        body_caller=body.get("caller"),
+        body_caller=requested if isinstance(requested, str) else None,
         trust_domain_cfg=os.environ.get("PLANE_TRUST_DOMAIN"),
     )
+    if isinstance(requested, str) and requested != ident.spiffe_id:
+        raise SpiffeBindingError(
+            "requested caller does not match the authenticated workload identity"
+        )
     out = dict(body)
     out["caller"] = ident.spiffe_id
     out["_identity_source"] = ident.source
