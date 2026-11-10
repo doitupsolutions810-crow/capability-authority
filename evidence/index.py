@@ -57,14 +57,16 @@ def _interprocess_path_lock(path: Path):
             os.close(fd)
 
 
+_GENESIS_TIP = "0" * 64
+
+
 class EvidenceIndex:
     """Verified JSON projection over the authoritative hash-chained warehouse.
 
-    Writers sharing the projection path serialize refreshes with a persistent
-    sidecar lock file. Ingest, query, and stats rebuild the materialized view
-    from a verified ledger snapshot, so stale process-local snapshots cannot
-    silently hide committed records. The lock file must remain in place while
-    service processes are running.
+    The first refresh in a process verifies the ledger from genesis and
+    rewrites the projection only when it differs. Later refreshes hash only
+    rows committed after that checkpoint and append those objects to the
+    projection. Writers sharing the path still serialize with the sidecar lock.
     """
 
     def __init__(self, path: Optional[Path] = None):
@@ -72,6 +74,9 @@ class EvidenceIndex:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._docs: List[dict] = self._read_projection()
+        self._synced = False
+        self._through_id = 0
+        self._tip = _GENESIS_TIP
 
     def _read_projection(self) -> List[dict]:
         if not self.path.exists():
@@ -105,17 +110,58 @@ class EvidenceIndex:
             except OSError:
                 pass
 
+    def _append_projection(self, new_docs: List[dict]) -> None:
+        """Add verified events without rewriting the checkpointed prefix."""
+        if not new_docs:
+            return
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            self._write_atomic(self._docs + new_docs)
+            return
+        pieces = [json.dumps(doc, indent=2, default=str).encode("utf-8") for doc in new_docs]
+        with self.path.open("r+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            end = handle.tell()
+            window = min(end, 4096)
+            handle.seek(end - window)
+            tail = handle.read(window)
+            relative = tail.rfind(b"]")
+            if relative < 0:
+                raise ValueError(
+                    f"evidence index is unreadable; refusing to reset history: {self.path}"
+                )
+            absolute = end - window + relative
+            before = tail[:relative].rstrip()
+            empty = before.endswith(b"[") or before == b""
+            payload = bytearray()
+            for index, piece in enumerate(pieces):
+                if not (empty and index == 0):
+                    payload += b",\n"
+                payload += piece
+            payload += b"\n]"
+            handle.seek(absolute)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            handle.truncate()
+
     def _refresh_from_warehouse(self, warehouse) -> List[dict]:
-        docs = warehouse.read_verified_events()
-        try:
-            projected = self._read_projection()
-        except ValueError:
-            # The verified ledger is authoritative; rebuild only the derived view.
-            projected = None
-        if projected != docs:
-            self._write_atomic(docs)
-        self._docs = docs
-        return docs
+        if not self._synced:
+            events, last_id, tip = warehouse.read_verified_chain()
+            if self._docs != events:
+                self._write_atomic(events)
+            self._docs = events
+            self._through_id = last_id
+            self._tip = tip
+            self._synced = True
+            return self._docs
+        new_events, last_id, tip = warehouse.read_verified_chain(self._through_id, self._tip)
+        if not new_events:
+            return self._docs
+        self._append_projection(new_events)
+        self._docs.extend(new_events)
+        self._through_id = last_id
+        self._tip = tip
+        return self._docs
 
     def ingest(self, event):
         with self._lock:
