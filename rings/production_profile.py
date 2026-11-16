@@ -25,11 +25,22 @@ def preflight():
     prod = is_production()
     report = PreflightReport(production=prod)
     sock = os.environ.get("SPIFFE_ENDPOINT_SOCKET")
-    source = "env" if os.environ.get("PLANE_SPIFFE_ID") else "fallback"
+    try:
+        # Use the identity resolver used by the broker, rather than inferring
+        # the source from environment variables. A configured Workload API can
+        # supply the production identity even when PLANE_SPIFFE_ID is unset.
+        from plane_service.spiffe_identity import fetch_workload_identity
+        ident = fetch_workload_identity(trust_domain_cfg=os.environ.get("PLANE_TRUST_DOMAIN"))
+        source = ident.source
+        identity_detail = f"source={source} socket={sock or 'unset'}"
+    except Exception as exc:
+        source = "unavailable"
+        identity_detail = f"source=unavailable error={type(exc).__name__}"
+
     if prod and source != "workload-api":
-        report.checks.append(Check("spire", False, f"source={source} socket={sock or 'unset'}"))
+        report.checks.append(Check("spire", False, identity_detail))
     else:
-        report.checks.append(Check("spire", True, source, fatal=False))
+        report.checks.append(Check("spire", True, identity_detail, fatal=False))
     meas = os.environ.get("PLANE_BROKER_MEASUREMENT", "dev:unattested")
     if prod and meas.startswith("dev:"):
         report.checks.append(Check("measurement", False, meas))
