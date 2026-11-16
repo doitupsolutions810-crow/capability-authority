@@ -31,9 +31,10 @@ policy = PolicyEngine()
 executor = Executor()
 acceptance = load_acceptance()
 
+_EVIDENCE_BUS_ATTACHED = False
 try:
     from evidence.index import attach_to_attestpipe
-    attach_to_attestpipe()
+    _EVIDENCE_BUS_ATTACHED = bool(attach_to_attestpipe())
 except Exception as e:
     print(f"[evidence-index] startup skip: {e}")
 
@@ -50,16 +51,15 @@ except Exception as e:
 
 
 def _record_evidence(event: dict) -> None:
-    try:
-        from evidence.index import get_index
-        get_index().ingest(event)
-    except Exception as e:
-        print(f"[evidence] ingest skipped: {e}")
-    try:
+    # Exactly one recording path: publishing routes through the attached index
+    # subscriber; without that subscriber, ingest directly. Do not both ingest
+    # and publish the same event, which previously caused duplicate records.
+    if _EVIDENCE_BUS_ATTACHED:
         from attestpipe.bus import BUS
         BUS.publish(event)
-    except Exception as e:
-        print(f"[attestpipe] publish skipped: {e}")
+    else:
+        from evidence.index import get_index
+        get_index().ingest(event)
 
 
 def _bus_publish(msg) -> None:
