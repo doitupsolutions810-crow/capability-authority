@@ -19,16 +19,15 @@ class EvidenceIndex:
         doc = dict(event)
         doc.setdefault("message_type", event.get("message_type") or event.get("type") or "unknown")
         doc["_indexed_at"] = time.time()
-        try:
-            from evidence.warehouse import get_warehouse
-            chained = get_warehouse().append(doc)
-            doc["_digest"] = chained.get("_digest")
-        except Exception:
-            pass
+        # A security receipt is not durable if the hash-chain append fails.
+        from evidence.warehouse import get_warehouse
+        chained = get_warehouse().append(doc)
+        doc["_digest"] = chained.get("_digest")
+        doc["_prev_digest"] = chained.get("_prev_digest")
         self._docs.append(doc)
         self.path.write_text(json.dumps(self._docs, indent=2, default=str))
         return doc
-    def query(self, *, capability_id=None, request_id=None, actor=None, message_type=None, limit=50):
+    def query(self, *, capability_id=None, request_id=None, actor=None, message_type=None, correlation_id=None, message_id=None, limit=50):
         out = []
         for d in reversed(self._docs):
             if capability_id and str(d.get("capability_id") or "") != capability_id:
@@ -38,6 +37,10 @@ class EvidenceIndex:
             if actor and actor not in str(d.get("audience") or d.get("actor_id") or d.get("caller") or ""):
                 continue
             if message_type and str(d.get("message_type") or "") != message_type:
+                continue
+            if correlation_id and str(d.get("correlation_id") or "") != correlation_id:
+                continue
+            if message_id and str(d.get("message_id") or "") != message_id:
                 continue
             out.append(d)
             if len(out) >= limit:

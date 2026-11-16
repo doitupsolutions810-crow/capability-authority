@@ -38,13 +38,15 @@ def _deny_forbidden_rights(rights):
         key = (r.get("type"), r.get("resource"))
         if key in FORBIDDEN_RIGHTS or str(r.get("resource") or "").startswith(("shell", "kubectl")):
             return f"forbidden right: {key}"
+        if not all(isinstance(r.get(k), str) and r.get(k).strip() for k in ("type", "resource", "method")):
+            return "each right requires an exact type, resource, and method"
     return None
 
 def mount_agent(name="parent", rights=None, ttl_seconds=120, constraints=None, caller=None):
     admitted = enter("agent", {"name": name})
     if admitted.get("status") != "admitted":
         return admitted
-    rights = rights or [{"type": "read", "resource": "demo"}]
+    rights = rights or [{"type": "read", "resource": "demo", "method": "GET"}]
     bad = _deny_forbidden_rights(rights)
     if bad:
         return {"status": "denied", "error": bad}
