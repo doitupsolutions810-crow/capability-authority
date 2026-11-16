@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -73,9 +74,9 @@ def _bus_publish(msg) -> None:
         _record_evidence({"message_type": type(msg).__name__, "raw": str(msg)})
 
 
-def handle_issue(body: dict) -> dict:
+def handle_issue(body: dict, authenticated_caller: str | None = None) -> dict:
     try:
-        body = bind_issue_request(body)
+        body = bind_issue_request(body, authenticated_caller=authenticated_caller)
     except SpiffeBindingError as e:
         return {"status": "error", "error": str(e)}
     identity = fetch_workload_identity(trust_domain_cfg=TRUST_DOMAIN)
@@ -228,6 +229,20 @@ class Handler(BaseHTTPRequestHandler):
             if not fn:
                 self._json(404, {"status": "error", "error": "unknown path"})
                 return
+            if path == "/v1/capabilities/issue":
+                peer = None
+                try:
+                    cert = self.connection.getpeercert()
+                    uris = [
+                        value for kind, value in (cert or {}).get("subjectAltName", [])
+                        if kind == "URI" and value.startswith("spiffe://")
+                    ]
+                    if len(uris) == 1:
+                        peer = uris[0]
+                except (AttributeError, ValueError):
+                    peer = None
+                self._json(200, handle_issue(body, authenticated_caller=peer))
+                return
             self._json(200, fn(body))
         except Exception as e:
             self._json(500, {"status": "error", "error": str(e)})
@@ -293,7 +308,27 @@ def main() -> None:
     host = os.environ.get("PLANE_HOST", "127.0.0.1")
     port = int(os.environ.get("PLANE_PORT", "8090"))
     httpd = HTTPServer((host, port), Handler)
-    print(f"Broker+Executor on http://{host}:{port} (ed25519)")
+    production = any(
+        os.environ.get(name, "0") == "1"
+        for name in ("PRODUCTION", "PLANE_PRODUCTION", "SPIFFE_REQUIRED")
+    )
+    scheme = "http"
+    if production:
+        cert_file = os.environ.get("PLANE_TLS_CERT_FILE", "")
+        key_file = os.environ.get("PLANE_TLS_KEY_FILE", "")
+        client_ca_file = os.environ.get("PLANE_TLS_CLIENT_CA_FILE", "")
+        if not cert_file or not key_file or not client_ca_file:
+            raise SystemExit(
+                "production requires PLANE_TLS_CERT_FILE, PLANE_TLS_KEY_FILE, "
+                "and PLANE_TLS_CLIENT_CA_FILE for mutual TLS"
+            )
+        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        context.load_verify_locations(cafile=client_ca_file)
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https+mTLS"
+    print(f"Broker+Executor on {scheme}://{host}:{port} (ed25519)")
     httpd.serve_forever()
 
 
