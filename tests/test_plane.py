@@ -11,9 +11,9 @@ def _fail(msg):
 
 def test_no_amplification():
     from plane_service.core import issue, attenuate
-    cap = issue("spiffe://prod/agent/dev", "spiffe://prod/broker", [{"type": "read", "resource": "demo"}], {}, 60, "prod", "dev:unattested", 1)
+    cap = issue("spiffe://prod/agent/dev", "spiffe://prod/broker", [{"type": "read", "resource": "demo", "method": "read"}], {}, 60, "prod", "dev:unattested", 1)
     try:
-        attenuate(cap, [{"type": "Execute", "resource": "tool.echo"}])
+        attenuate(cap, [{"type": "Execute", "resource": "tool.echo", "method": "execute"}])
     except ValueError:
         print("PASS no_amplification")
         return
@@ -25,7 +25,7 @@ def test_issue_sign_execute():
     from plane_service.executor import Executor
     from plane_service.policy import PolicyEngine
     caller = "spiffe://prod/agent/dev"
-    rights = [{"type": "read", "resource": "demo"}]
+    rights = [{"type": "read", "resource": "demo", "method": "read"}]
     PolicyEngine().authorize(caller, rights, {}, 60)
     cap = issue(caller, "spiffe://prod/broker", rights, {}, 60, "prod", "dev:unattested", 1)
     sig = sign(cap)

@@ -30,6 +30,7 @@ jobs:
       - name: Lab tests
         run: |
           python tests/test_plane.py
+          python tests/test_capability_method_authorization.py
           python tests/test_evidence_receipt_spiffe.py
           python tests/test_agents.py
       - name: Hands + agent demos
