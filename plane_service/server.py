@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -49,17 +50,25 @@ except Exception as e:
     print(f"[preflight] skip: {e}")
 
 
-def _record_evidence(event: dict) -> None:
+def _record_evidence(event: dict) -> bool:
+    # Give each logical event a stable identity before sending it through both
+    # the index and the bus. The index uses event_id to collapse the duplicate
+    # delivery caused by its AttestPipe subscription.
+    event = dict(event)
+    event.setdefault("event_id", uuid.uuid4().hex)
+    indexed = False
     try:
         from evidence.index import get_index
         get_index().ingest(event)
+        indexed = True
     except Exception as e:
-        print(f"[evidence] ingest skipped: {e}")
+        print(f"[evidence] ingest failed: {e}")
     try:
         from attestpipe.bus import BUS
         BUS.publish(event)
     except Exception as e:
-        print(f"[attestpipe] publish skipped: {e}")
+        print(f"[attestpipe] publish failed: {e}")
+    return indexed
 
 
 def _bus_publish(msg) -> None:
@@ -101,7 +110,7 @@ def handle_issue(body: dict) -> dict:
         policy_version=POLICY_VERSION,
     )
     sig = sign(cap)
-    _record_evidence(
+    evidence_recorded = _record_evidence(
         {
             "message_type": "CapabilityIssued",
             "capability_id": cap["id"],
@@ -109,8 +118,18 @@ def handle_issue(body: dict) -> dict:
             "issuer": cap.get("issuer", ""),
         }
     )
+    if not evidence_recorded:
+        # The capability was minted in-process, but its audit record is unknown.
+        # Do not release the signed capability as an unqualified success.
+        return {
+            "status": "indeterminate",
+            "audit_status": "unknown",
+            "capability_id": cap["id"],
+            "error": "capability was issued internally but evidence persistence could not be confirmed; reconcile before retrying",
+        }
     return {
         "status": "ok",
+        "audit_status": "recorded",
         "capability": cap,
         "signature": sig,
         "platform": os.environ.get("PLANE_PLATFORM", "dev"),
@@ -153,7 +172,7 @@ def handle_execute(body: dict) -> dict:
     result = executor.execute(cap, sig, required, caller)
     if result.get("status") == "ok":
         receipt = result.get("receipt") or {}
-        _record_evidence(
+        evidence_recorded = _record_evidence(
             {
                 "message_type": "ExecuteReceipt",
                 "capability_id": cap.get("id", ""),
@@ -161,6 +180,15 @@ def handle_execute(body: dict) -> dict:
                 "outcome": receipt.get("outcome", ""),
             }
         )
+        if not evidence_recorded:
+            # The action may already have happened; do not invite a blind retry.
+            return {
+                **result,
+                "status": "indeterminate",
+                "audit_status": "unknown",
+                "error": "execution returned success but evidence persistence could not be confirmed",
+            }
+        result["audit_status"] = "recorded"
     return result
 
 
