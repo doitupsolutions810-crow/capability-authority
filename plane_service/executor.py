@@ -172,10 +172,19 @@ class Executor:
         action = f"{kind}:{resource}:{method}"
         rl = (cap.get("constraints") or {}).get("rate_limit") or {}
         rate_key = f"{cap.get('id')}:{action}"
-        payload_digest = payload_digest or ("sha256:" + hashlib.sha256(
-            json.dumps({"required": required, "input": action_input or {}},
-                       sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest())
+        if payload_digest is None:
+            try:
+                encoded = json.dumps(
+                    {"required": required, "input": action_input or {}},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
+            except (TypeError, ValueError, OverflowError) as exc:
+                from plane_service.anomalies import log_anomaly
+                log_anomaly("execution payload is not finite JSON", exc)
+                return {"status": "error", "error": "execution request is not finite JSON"}
+            payload_digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
         if not isinstance(correlation_id, str) or not correlation_id.strip() or len(correlation_id) > 128:
             correlation_id = uuid.uuid4().hex
         replay_key = (correlation_id, str(cap.get("id")), action)

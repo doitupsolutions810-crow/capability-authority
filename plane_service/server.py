@@ -26,6 +26,7 @@ from plane_service.core import attenuate, issue, verify
 from plane_service.crypto_sign import canonical, public_key_b64, sign, verify_sig
 from plane_service.executor import Executor
 from plane_service.policy import PolicyEngine, PolicyError
+from plane_service.anomalies import log_anomaly
 from plane_service.spiffe_binding import SpiffeBindingError, bind_issue_request
 from plane_service.delegation import DelegationError, verify_requester_assertion, validate_delegation
 from plane_service.issuance_idempotency import (
@@ -111,7 +112,8 @@ def _bus_publish(msg) -> None:
     try:
         from dataclasses import asdict
         _record_evidence(asdict(msg))
-    except Exception:
+    except Exception as exc:
+        log_anomaly("could not adapt bus message to an evidence event", exc)
         _record_evidence({"message_type": type(msg).__name__, "raw": str(msg)})
 
 
@@ -192,7 +194,10 @@ def handle_issue(body: dict) -> dict:
     if isinstance(raw_ttl, bool) or not isinstance(raw_ttl, int):
         return {"status": "error", "error": "TTL must be an integer"}
     ttl = min(raw_ttl, 300)
-    constraints = dict(body.get("constraints") or {})
+    raw_constraints = body.get("constraints") or {}
+    if not isinstance(raw_constraints, dict):
+        return {"status": "error", "error": "constraints must be an object"}
+    constraints = dict(raw_constraints)
     supplied_correlation = "correlation_id" in body and body.get("correlation_id") is not None
     correlation_id = body.get("correlation_id")
     if supplied_correlation:
@@ -231,7 +236,9 @@ def handle_issue(body: dict) -> dict:
             "broker_public_key_b64": public_key_b64(),
             "_identity_source": body.get("_identity_source"),
         }
-    fingerprint = _issue_fingerprint(caller, rights, constraints, ttl)
+    # Fingerprint the requested TTL. Capping 301 and 300 to the same stored
+    # lifetime must not make those two requests idempotent replays of each other.
+    fingerprint = _issue_fingerprint(caller, rights, constraints, raw_ttl)
     try:
         record, created = get_issuance_store().commit_or_replay(
             correlation_id=correlation_id,
@@ -328,7 +335,8 @@ def _publish_delegated(record: IssuedAssertion, *, created: bool, requester: str
         return _ok_delegation(record, created=False)
     try:
         _record_evidence(event)
-    except Exception:
+    except Exception as exc:
+        log_anomaly("delegated evidence write failed; reconciling from the ledger", exc)
         prior = index.query(message_type="CapabilityDelegated", correlation_id=record.correlation_id, limit=1)
         if prior:
             if not _evidence_matches_issuance(prior[0], record):
@@ -720,12 +728,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             raw = self.rfile.read(n) if n else b"{}"
-        except (TimeoutError, socket.timeout):
+        except (TimeoutError, socket.timeout) as exc:
             self.close_connection = True
+            log_anomaly("request body read timed out", exc)
             try:
                 self._json(408, {"status": "error", "error": "request body read timed out"})
-            except Exception:
-                pass
+            except Exception as write_exc:
+                log_anomaly("could not write request-timeout response", write_exc)
             return
         if len(raw) != n:
             self._json(400, {"status": "error", "error": "incomplete request body"})
@@ -741,7 +750,8 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError, OverflowError):
             self._json(400, {"status": "error", "error": "malformed, duplicate-key, or non-finite JSON request body"})
             return
-        except Exception:
+        except Exception as exc:
+            log_anomaly("malformed JSON request body", exc)
             self._json(400, {"status": "error", "error": "malformed JSON request body"})
             return
         if not isinstance(body, dict):
@@ -749,7 +759,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             self._json(200, ROUTES[path](body))
-        except Exception:
+        except Exception as exc:
+            log_anomaly(f"unhandled error on POST {path}", exc)
             self._json(500, {"status": "error", "error": "internal server error"})
 
     def do_GET(self) -> None:
@@ -760,8 +771,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 from plane_service.spiffe_identity import identity_summary
                 ident = identity_summary()
-            except Exception:
-                pass
+            except Exception as exc:
+                log_anomaly("health identity lookup failed", exc)
             self._json(
                 200,
                 {
@@ -789,6 +800,15 @@ class Handler(BaseHTTPRequestHandler):
             if q.get("stats"):
                 self._json(200, idx.stats())
                 return
+            try:
+                limit = int((q.get("limit") or ["20"])[0])
+            except (TypeError, ValueError) as exc:
+                log_anomaly("evidence query limit is not an integer", exc)
+                self._json(400, {"status": "error", "error": "limit must be an integer"})
+                return
+            if limit < 1 or limit > 1000:
+                self._json(400, {"status": "error", "error": "limit must be an integer from 1 to 1000"})
+                return
             rows = idx.query(
                 capability_id=(q.get("capability_id") or [None])[0],
                 request_id=(q.get("request_id") or [None])[0],
@@ -796,7 +816,7 @@ class Handler(BaseHTTPRequestHandler):
                 message_type=(q.get("message_type") or [None])[0],
                 correlation_id=(q.get("correlation_id") or [None])[0],
                 message_id=(q.get("message_id") or [None])[0],
-                limit=int((q.get("limit") or ["20"])[0]),
+                limit=limit,
             )
             self._json(200, {"count": len(rows), "results": rows})
             return
