@@ -86,8 +86,9 @@ def _try_workload_api(sock_path: str) -> Optional[WorkloadIdentity]:
                 f"[spiffe] socket reachable at {sock_path}; "
                 "pip install spiffe for X509-SVID fetch"
             )
-    except Exception as e:
-        print(f"[spiffe] Workload API client error: {e}")
+    except Exception as exc:
+        from plane_service.anomalies import log_anomaly
+        log_anomaly(f"Workload API client error for {sock_path}", exc)
     if reachable:
         return None
     return None

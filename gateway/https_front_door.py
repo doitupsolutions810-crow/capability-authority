@@ -27,7 +27,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path not in ALLOWED:
             return self._json(404, {"status": "error", "error": "path not allowed"})
-        n = int(self.headers.get("Content-Length") or 0)
+        raw_length = self.headers.get("Content-Length") or "0"
+        if len(raw_length) > 10 or not raw_length.isdigit():
+            return self._json(400, {"status": "error", "error": "invalid Content-Length"})
+        n = int(raw_length)
+        if n > 65536:
+            return self._json(413, {"status": "error", "error": "request body exceeds 64 KiB"})
         data = self.rfile.read(n) if n else None
         req = urllib.request.Request(UPSTREAM + self.path, data=data, method=self.command)
         if data is not None:
@@ -40,8 +45,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
-        except Exception as e:
-            self._json(502, {"status": "error", "error": str(e)})
+        except Exception as exc:
+            from plane_service.anomalies import log_anomaly
+            log_anomaly(f"front door proxy failed for {path}", exc)
+            self._json(502, {"status": "error", "error": "upstream request failed"})
     def _json(self, code, obj):
         data = json.dumps(obj).encode()
         self.send_response(code)
